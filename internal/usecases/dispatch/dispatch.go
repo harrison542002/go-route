@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -200,4 +201,14 @@ func (d *Dispatcher) failedAttempt(t Target, startedAt time.Time, err error) dom
 
 func msBetween(from, to time.Time) int {
 	return int(to.Sub(from).Milliseconds())
+}
+
+func Validate(o domains.Outcome) error {
+	if o.Status == "" {
+		return fmt.Errorf("outcome has no status")
+	}
+	if o.Status == domains.StatusExhausted && o.TTFTMs != 0 {
+		return fmt.Errorf("exhausted outcome has a first-token time")
+	}
+	return nil
 }
