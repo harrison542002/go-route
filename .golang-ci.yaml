@@ -1,0 +1,12 @@
+linters-settings:
+  depguard:
+    rules:
+      core-is-pure:
+        files: ["**/internal/core/**"]
+        deny:
+          - pkg: "go-route/internal/adapters"
+            desc: "core must not know about adapters"
+          - pkg: "database/sql"
+            desc: "core must not do I/O"
+          - pkg: "net/http"
+            desc: "core must not know about transport"

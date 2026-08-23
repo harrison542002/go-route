@@ -1,0 +1,33 @@
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-sonnet-5","id":"msg_011CeKqPkNsZg1GLWYZFot2A","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":2,"service_tier":"standard","inference_geo":"global"}}       }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}      }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EpQCCpABCBEYAipA+CYi7QHAT1W+X/Nt7dq59jgJxXBSX1YOKUFbAVClhn9DyIRiaTSLJJJe0SBs0TLQIPSjgBmadaYGTSHnjcKQ0TIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ1OWVkOTUyOS00YjY2LTQ1MjktODdhOS03NzU3OGJlNzI2MWKoAYiGrNQGEgwxxityMVQx0UeTGVMaDMmNJ2hvAZ6EYBQwCiIw70jU1/28Moxzlvt4d1vyaU6rcZoYMRCB0fx64AP8wsskzibtDzld1MaIsOO0/xDsKjEFrRf+YOoT1BuGjYlk+b8QEqn9tDiC+eUtx5fb+uYaDKCSWtagjgyaWIccaLaNKIWaGAE="}  }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0           }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"1, 2, 3, 4, 5"} }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1          }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":28,"output_tokens_details":{"thinking_tokens":13}}          }
+
+event: message_stop
+data: {"type":"message_stop"            }
+
