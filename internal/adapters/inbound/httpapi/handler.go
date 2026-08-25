@@ -34,14 +34,15 @@ type Handler struct {
 	router     Router
 	resolver   Resolver
 	dispatcher *dispatch.Dispatcher
+	sink       ports.DecisionSink
 	now        func() time.Time
 }
 
-func NewHandler(r Router, res Resolver, d *dispatch.Dispatcher, now func() time.Time) *Handler {
+func NewHandler(r Router, res Resolver, d *dispatch.Dispatcher, sink ports.DecisionSink, now func() time.Time) *Handler {
 	if now == nil {
 		now = time.Now
 	}
-	return &Handler{router: r, resolver: res, dispatcher: d, now: now}
+	return &Handler{router: r, resolver: res, dispatcher: d, sink: sink, now: now}
 }
 
 func (h *Handler) Completions(w http.ResponseWriter, r *http.Request) {
@@ -68,9 +69,6 @@ func (h *Handler) Completions(w http.ResponseWriter, r *http.Request) {
 
 	targets, err := h.resolver.Resolve(ladder)
 	if err != nil {
-		// Config validation proves every reference resolves at boot, so
-		// reaching here means the config and the built providers have
-		// drifted apart. Log it: the client cannot act on this.
 		slog.Error("resolver failed on a validated ladder",
 			"decision_id", decisionID.String(), "err", err)
 		writeError(w, http.StatusInternalServerError, "routing misconfiguration", "internal_error")
@@ -80,21 +78,14 @@ func (h *Handler) Completions(w http.ResponseWriter, r *http.Request) {
 	out := NewClientStream(w, decisionID, facts.Stream)
 
 	outcome := h.dispatcher.Run(r.Context(), targets, &ports.ProviderRequest{
-		// Model is set per-attempt by the dispatcher from each target.
 		Body:       raw,
 		Stream:     facts.Stream,
 		WantsUsage: facts.WantsUsage,
 	}, out)
 
-	// StatusExhausted is the only terminal status that guarantees the
-	// commit boundary was never crossed, so it is the only case where a
-	// real HTTP status is still available.
-	// See dispatch.TestRun_AllTargetsFail_NeverCommits.
 	if outcome.Status == domains.StatusExhausted {
 		writeError(w, statusFor(outcome), lastMessage(outcome), "upstream_error")
 	}
 
-	// TODO(milestone-1): record the decision. Everything it needs is in
-	// scope here: decisionID, facts, ladder.Reason, and outcome.
-	_ = ladder.Reason
+	h.sink.Record(domains.NewRoutingDecision(decisionID, facts, ladder, outcome))
 }

@@ -18,7 +18,10 @@ type Target struct {
 }
 
 func (t Target) String() string {
-	return t.Provider.Name() + "/" + t.Model
+	if t.Ref.Name == "" {
+		return "unnamed:" + t.Model
+	}
+	return t.Ref.Name
 }
 
 type Dispatcher struct {

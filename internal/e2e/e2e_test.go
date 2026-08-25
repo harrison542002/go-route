@@ -1,11 +1,15 @@
 // Package e2e wires the real components together and drives them over a
 // real socket against a fake upstream. It is the only place where a
-// config file, the router, the resolver, the dispatcher, the adapter, and
-// the HTTP layer are exercised as one system.
+// config file, the router, the resolver, the dispatcher, the adapter, the
+// sink, and the HTTP layer are exercised as one system.
+//
+// It builds through bootstrap.Build — the same entry point main.go uses —
+// so the wiring under test cannot drift from the wiring that ships.
 package e2e
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -18,8 +22,9 @@ import (
 	"time"
 
 	"github.com/harrison542002/go-route/internal/adapters/inbound/httpapi"
-	"github.com/harrison542002/go-route/internal/boostrap"
+	"github.com/harrison542002/go-route/internal/bootstrap"
 	"github.com/harrison542002/go-route/internal/config"
+	"github.com/harrison542002/go-route/internal/core/domains"
 	"github.com/harrison542002/go-route/internal/core/sse"
 )
 
@@ -51,8 +56,7 @@ func newUpstream(t *testing.T, respond http.HandlerFunc) *upstream {
 }
 
 // record serialises writes. Handlers run on their own goroutines, and
-// -race will flag the plain assignment even in tests that only make one
-// request.
+// -race will flag a plain assignment even in tests that make one request.
 func (u *upstream) record(body []byte, h http.Header) {
 	<-u.mu
 	u.gotBody, u.gotHeader = body, h
@@ -85,9 +89,8 @@ func fail(status int) http.HandlerFunc {
 	}
 }
 
-// boot writes a config and builds the system through app.Build, which is
-// the same path main.go takes.
-func boot(t *testing.T, yaml string) *httptest.Server {
+// boot writes a config and builds the system through bootstrap.Build.
+func boot(t *testing.T, yaml string) (*httptest.Server, *bootstrap.App) {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -100,7 +103,7 @@ func boot(t *testing.T, yaml string) *httptest.Server {
 		t.Fatalf("config: %v", err)
 	}
 
-	a, err := boostrap.Build(cfg)
+	a, err := bootstrap.Build(cfg)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -112,7 +115,27 @@ func boot(t *testing.T, yaml string) *httptest.Server {
 
 	srv := httptest.NewServer(httpapi.NewServer("", a.Handler).Handler)
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, a
+}
+
+// records flushes the sink and returns what was written.
+//
+// Record is asynchronous by design, so reading without flushing is racy.
+// Flush closes the sink permanently: call it once, after the last request
+// in a test.
+func records(t *testing.T, a *bootstrap.App) []domains.RoutingDecision {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := a.Sink.Flush(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	if a.Memory == nil {
+		t.Fatal("this test needs sink: {type: memory} in its config")
+	}
+	return a.Memory.Records()
 }
 
 func post(t *testing.T, srv *httptest.Server, body string) *http.Response {
@@ -154,7 +177,7 @@ func TestE2E_StreamingRoundTrip(t *testing.T) {
 		`[DONE]`,
 	))
 
-	srv := boot(t, `
+	srv, _ := boot(t, `
 providers:
   fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: sk-test}
 targets:
@@ -210,7 +233,7 @@ func TestE2E_NonStreamingRoundTrip(t *testing.T) {
 		_, _ = w.Write([]byte(respBody))
 	})
 
-	srv := boot(t, `
+	srv, _ := boot(t, `
 providers:
   fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
 targets:
@@ -239,7 +262,7 @@ func TestE2E_FailoverAcrossProviders(t *testing.T) {
 	dead := newUpstream(t, fail(http.StatusServiceUnavailable))
 	alive := newUpstream(t, streamOK(`{"choices":[{"delta":{"content":"ok"}}]}`, `[DONE]`))
 
-	srv := boot(t, `
+	srv, _ := boot(t, `
 providers:
   dead:  {type: oaicompat, base_url: `+dead.URL+`/v1, api_key: k}
   alive: {type: oaicompat, base_url: `+alive.URL+`/v1, api_key: k}
@@ -268,7 +291,7 @@ func TestE2E_NonRetryableStopsLadder(t *testing.T) {
 	bad := newUpstream(t, fail(http.StatusUnauthorized))
 	never := newUpstream(t, streamOK(`[DONE]`))
 
-	srv := boot(t, `
+	srv, _ := boot(t, `
 providers:
   bad:   {type: oaicompat, base_url: `+bad.URL+`/v1, api_key: wrong}
   never: {type: oaicompat, base_url: `+never.URL+`/v1, api_key: k}
@@ -307,7 +330,7 @@ func TestE2E_TokensArriveIncrementally(t *testing.T) {
 		_ = rc.Flush()
 	})
 
-	srv := boot(t, `
+	srv, _ := boot(t, `
 providers:
   fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
 targets:
@@ -342,7 +365,8 @@ func TestE2E_UpstreamTruncation(t *testing.T) {
 		_ = rc.Flush()
 	})
 
-	srv := boot(t, `
+	srv, a := boot(t, `
+sink: {type: memory}
 providers:
   fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
 targets:
@@ -363,6 +387,15 @@ models:
 	}
 	if strings.Contains(body, "[DONE]") {
 		t.Error("a truncated stream must not be terminated with [DONE]")
+	}
+
+	// A truncated stream is exactly the case an audit trail must capture.
+	recs := records(t, a)
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	if recs[0].Outcome.Status != domains.StatusTruncated {
+		t.Errorf("status = %q, want truncated", recs[0].Outcome.Status)
 	}
 }
 
@@ -410,6 +443,19 @@ models:
 `,
 			want: "unset environment",
 		},
+		{
+			name: "unknown sink type",
+			yaml: `
+sink: {type: nonsense}
+providers:
+  p: {type: oaicompat, base_url: http://x/v1, api_key: k}
+targets:
+  p/m: {provider: p, model: m}
+models:
+  chat: [p/m]
+`,
+			want: "sink",
+		},
 	}
 
 	for _, tt := range tests {
@@ -434,7 +480,7 @@ models:
 func TestE2E_UnknownModelRejected(t *testing.T) {
 	up := newUpstream(t, streamOK(`[DONE]`))
 
-	srv := boot(t, `
+	srv, _ := boot(t, `
 providers:
   fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
 targets:
@@ -453,5 +499,84 @@ models:
 	}
 	if up.calls.Load() != 0 {
 		t.Error("an unknown model reached an upstream")
+	}
+}
+
+func TestE2E_DecisionRecorded(t *testing.T) {
+	up := newUpstream(t, streamOK(
+		`{"choices":[{"delta":{"content":"hi"}}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":4}}}`,
+		`[DONE]`,
+	))
+
+	srv, a := boot(t, `
+sink: {type: memory}
+providers:
+  fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
+targets:
+  fake/m: {provider: fake, model: upstream-model}
+models:
+  chat: [fake/m]
+`)
+
+	resp := post(t, srv, `{"model":"chat","messages":[],"stream":true}`)
+	_ = readAll(t, resp) // the record is written when the handler returns
+
+	recs := records(t, a)
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	r := recs[0]
+
+	if r.ID.IsZero() {
+		t.Error("decision has no ID")
+	}
+	if r.Outcome.Status != domains.StatusOK {
+		t.Errorf("status = %q", r.Outcome.Status)
+	}
+	if r.Outcome.ChosenTarget() != "fake/m" {
+		t.Errorf("chosen = %q, want the stable config name", r.Outcome.ChosenTarget())
+	}
+	if r.Ladder.Reason.ModelAlias != "chat" {
+		t.Errorf("reason lost: %+v", r.Ladder.Reason)
+	}
+	if r.Outcome.Usage.Input != 8 || r.Outcome.Usage.CacheRead != 4 {
+		t.Errorf("usage = %+v, want Input 8 CacheRead 4", r.Outcome.Usage)
+	}
+	if r.Request.Metadata == nil {
+		t.Error("metadata map is nil; reports index into it")
+	}
+}
+
+// Failures are the most interesting rows in the audit log; a record must
+// exist even when nothing was served.
+func TestE2E_FailureRecorded(t *testing.T) {
+	dead := newUpstream(t, fail(http.StatusServiceUnavailable))
+
+	srv, a := boot(t, `
+sink: {type: memory}
+providers:
+  dead: {type: oaicompat, base_url: `+dead.URL+`/v1, api_key: k}
+targets:
+  dead/m: {provider: dead, model: m}
+models:
+  chat: [dead/m]
+`)
+
+	resp := post(t, srv, `{"model":"chat","messages":[],"stream":true}`)
+	_ = readAll(t, resp)
+
+	recs := records(t, a)
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1 — failures must still be recorded", len(recs))
+	}
+	if recs[0].Outcome.Status != domains.StatusExhausted {
+		t.Errorf("status = %q, want exhausted", recs[0].Outcome.Status)
+	}
+	if len(recs[0].Outcome.Attempts) != 1 {
+		t.Errorf("attempts = %d, want 1", len(recs[0].Outcome.Attempts))
+	}
+	if recs[0].Outcome.ChosenTarget() != "" {
+		t.Error("an exhausted outcome must not name a chosen target")
 	}
 }

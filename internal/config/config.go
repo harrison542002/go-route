@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -15,6 +16,14 @@ type Config struct {
 	Providers map[string]Provider `yaml:"providers"`
 	Targets   map[string]Target   `yaml:"targets"`
 	Models    map[string][]string `yaml:"models"`
+	Sink      Sink                `yaml:"sink"`
+}
+
+type Sink struct {
+	Type          string        `yaml:"type"`
+	BufferSize    int           `yaml:"buffer_size"`
+	BatchSize     int           `yaml:"batch_size"`
+	FlushInterval time.Duration `yaml:"flush_interval"`
 }
 
 type Provider struct {
@@ -58,15 +67,17 @@ func Load(path string) (*Config, error) {
 	if cfg.Listen == "" {
 		cfg.Listen = ":4000"
 	}
+
+	if cfg.Sink.Type == "" {
+		cfg.Sink.Type = "log"
+	}
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
 }
 
-// expandEnv substitutes ${VAR}. An unset variable is an error rather
-// than an empty string: an empty API key would otherwise surface as a
-// 401 on the first request instead of a clear failure at boot.
 func expandEnv(raw []byte) ([]byte, error) {
 	var missing []string
 
@@ -87,9 +98,6 @@ func expandEnv(raw []byte) ([]byte, error) {
 	return out, nil
 }
 
-// validate catches every referential error at boot. A dangling target
-// reference discovered on the first live request is a production
-// incident; discovered at startup it is a failed deploy.
 func (c *Config) validate() error {
 	var errs []string
 
@@ -127,6 +135,12 @@ func (c *Config) validate() error {
 				errs = append(errs, fmt.Sprintf("model %q: unknown target %q", alias, tn))
 			}
 		}
+	}
+
+	switch c.Sink.Type {
+	case "log", "memory", "none":
+	default:
+		errs = append(errs, fmt.Sprintf("sink: unknown type %q (log, memory, none)", c.Sink.Type))
 	}
 
 	if len(errs) > 0 {

@@ -31,5 +31,10 @@ go.work.sum
 # .idea/
 # .vscode/
 
-# go-route configuration test file
+# test files
 configs
+startup-script
+
+# python
+__pycache__
+.pytest_cache

@@ -6,6 +6,8 @@ import (
 	"github.com/harrison542002/go-route/internal/ports"
 )
 
+const maxErrorBodyBytes = 8 << 10
+
 // errorResponse is the OpenAI error envelope. Most compatible providers
 // emit it; those that do not fall back to the raw body as the message.
 type errorResponse struct {
@@ -15,8 +17,6 @@ type errorResponse struct {
 		Code    string `json:"code"`
 	} `json:"error"`
 }
-
-const maxErrorBodyBytes = 8 << 10
 
 // classify maps an upstream HTTP status onto a failure kind and a
 // retry decision. The retry decision is what drives the ladder, so the

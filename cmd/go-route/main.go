@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/harrison542002/go-route/internal/adapters/inbound/httpapi"
-	"github.com/harrison542002/go-route/internal/boostrap"
+	"github.com/harrison542002/go-route/internal/bootstrap"
 	"github.com/harrison542002/go-route/internal/config"
 )
 
@@ -41,7 +41,7 @@ func run() error {
 		return err
 	}
 
-	application, err := boostrap.Build(cfg)
+	application, err := bootstrap.Build(cfg)
 	if err != nil {
 		return err
 	}
@@ -95,8 +95,11 @@ func run() error {
 	}
 	abortInFlight()
 
-	// TODO(milestone-1): sink.Flush belongs HERE — after Shutdown, so
-	// records for in-flight requests are complete, and before exit.
+	flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelFlush()
+	if err := application.Sink.Flush(flushCtx); err != nil {
+		slog.Error("sink flush failed; records lost", "err", err)
+	}
 
 	slog.Info("shutdown complete")
 	return nil

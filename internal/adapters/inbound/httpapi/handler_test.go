@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -141,8 +142,30 @@ var testNowFn = func() time.Time {
 	return time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 }
 
-func newHandler(r Router, res Resolver) *Handler {
-	return NewHandler(r, res, dispatch.New(testNowFn), testNowFn)
+func newHandler(r Router, res Resolver) (*Handler, *recordingSink) {
+	s := &recordingSink{}
+	return NewHandler(r, res, dispatch.New(testNowFn), s, testNowFn), s
+}
+
+type recordingSink struct {
+	mu      sync.Mutex
+	records []domains.RoutingDecision
+}
+
+var _ ports.DecisionSink = (*recordingSink)(nil)
+
+func (s *recordingSink) Record(d domains.RoutingDecision) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.records = append(s.records, d)
+}
+
+func (s *recordingSink) Flush(context.Context) error { return nil }
+
+func (s *recordingSink) Records() []domains.RoutingDecision {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]domains.RoutingDecision(nil), s.records...)
 }
 
 // --- request helpers -------------------------------------------------
@@ -195,7 +218,8 @@ func TestCompletions_StreamingSuccess(t *testing.T) {
 	p := scriptedProvider(ctrl, "openai", chunks("Hel", "lo"))
 	r, res, _ := routing(ctrl, []dispatch.Target{target(p, "openai", "upstream-m")}, nil)
 
-	resp := post(t, newHandler(r, res),
+	h, _ := newHandler(r, res)
+	resp := post(t, h,
 		`{"model":"fast","messages":[{"role":"user","content":"hi"}],"stream":true}`,
 		map[string]string{"x-go-route-feature": "auto-tag"})
 
@@ -222,7 +246,8 @@ func TestCompletions_PassesFactsToRouter(t *testing.T) {
 	p := scriptedProvider(ctrl, "openai", chunks("x"))
 	r, res, got := routing(ctrl, []dispatch.Target{target(p, "openai", "m")}, nil)
 
-	post(t, newHandler(r, res),
+	h, _ := newHandler(r, res)
+	post(t, h,
 		`{"model":"fast","messages":[],"stream":true,"stream_options":{"include_usage":true}}`,
 		map[string]string{
 			"x-go-route-feature":    "auto-tag",
@@ -266,7 +291,8 @@ func TestCompletions_DispatchesTargetModel(t *testing.T) {
 
 	r, res, _ := routing(ctrl, []dispatch.Target{target(p, "openai", "gpt-5-mini")}, nil)
 
-	post(t, newHandler(r, res), `{"model":"fast","messages":[],"stream":true}`, nil)
+	h, _ := newHandler(r, res)
+	post(t, h, `{"model":"fast","messages":[],"stream":true}`, nil)
 
 	if gotReq.Model != "gpt-5-mini" {
 		t.Errorf("Model = %q, want the target's upstream model", gotReq.Model)
@@ -288,7 +314,8 @@ func TestCompletions_NonStreaming(t *testing.T) {
 	})
 	r, res, _ := routing(ctrl, []dispatch.Target{target(p, "openai", "m")}, nil)
 
-	resp := post(t, newHandler(r, res), `{"model":"fast","messages":[]}`, nil)
+	h, _ := newHandler(r, res)
+	resp := post(t, h, `{"model":"fast","messages":[]}`, nil)
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
@@ -313,7 +340,8 @@ func TestCompletions_FailoverIsInvisibleToTheClient(t *testing.T) {
 		target(alive, "alive", "b"),
 	}, nil)
 
-	resp := post(t, newHandler(r, res), `{"model":"fast","messages":[],"stream":true}`, nil)
+	h, _ := newHandler(r, res)
+	resp := post(t, h, `{"model":"fast","messages":[],"stream":true}`, nil)
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 — failover should be transparent", resp.StatusCode)
@@ -351,7 +379,8 @@ func TestCompletions_BadRequests(t *testing.T) {
 			p := unusedProvider(ctrl, "p")
 			r, res, _ := routing(ctrl, []dispatch.Target{target(p, "p", "m")}, tt.routerErr)
 
-			resp := post(t, newHandler(r, res), tt.body, nil)
+			h, _ := newHandler(r, res)
+			resp := post(t, h, tt.body, nil)
 
 			if resp.StatusCode != tt.wantStatus {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
@@ -378,7 +407,8 @@ func TestCompletions_BodyTooLarge(t *testing.T) {
 	big := fmt.Sprintf(`{"model":"fast","messages":[{"role":"user","content":%q}]}`,
 		strings.Repeat("x", 4096))
 
-	resp := post(t, newHandler(r, res), big, nil)
+	h, _ := newHandler(r, res)
+	resp := post(t, h, big, nil)
 
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Errorf("status = %d, want 413", resp.StatusCode)
@@ -398,7 +428,8 @@ func TestCompletions_ResolverFailure(t *testing.T) {
 	res := httpmocks.NewMockResolver(ctrl)
 	res.EXPECT().Resolve(gomock.Any()).Return(nil, errors.New(`no provider "ghost"`))
 
-	resp := post(t, newHandler(r, res), `{"model":"fast","messages":[]}`, nil)
+	h, _ := newHandler(r, res)
+	resp := post(t, h, `{"model":"fast","messages":[]}`, nil)
 
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", resp.StatusCode)
@@ -453,7 +484,8 @@ func TestCompletions_ExhaustedLadder(t *testing.T) {
 			p := failingProvider(ctrl, "p", tt.upstream)
 			r, res, _ := routing(ctrl, []dispatch.Target{target(p, "p", "m")}, nil)
 
-			resp := post(t, newHandler(r, res), `{"model":"fast","messages":[],"stream":true}`, nil)
+			h, _ := newHandler(r, res)
+			resp := post(t, h, `{"model":"fast","messages":[],"stream":true}`, nil)
 
 			if resp.StatusCode != tt.wantStatus {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
@@ -485,7 +517,8 @@ func TestCompletions_NonRetryableStopsLadder(t *testing.T) {
 		target(never, "never", "b"),
 	}, nil)
 
-	resp := post(t, newHandler(r, res), `{"model":"fast","messages":[],"stream":true}`, nil)
+	h, _ := newHandler(r, res)
+	resp := post(t, h, `{"model":"fast","messages":[],"stream":true}`, nil)
 
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502", resp.StatusCode)
@@ -512,7 +545,8 @@ func TestCompletions_TruncationAfterCommit(t *testing.T) {
 		target(backup, "backup", "b"),
 	}, nil)
 
-	resp := post(t, newHandler(r, res), `{"model":"fast","messages":[],"stream":true}`, nil)
+	h, _ := newHandler(r, res)
+	resp := post(t, h, `{"model":"fast","messages":[],"stream":true}`, nil)
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200 — already committed", resp.StatusCode)
