@@ -14,6 +14,7 @@ import (
 type Target struct {
 	Provider ports.Provider
 	Model    string
+	Ref      domains.TargetRef
 }
 
 func (t Target) String() string {
@@ -75,7 +76,9 @@ func (d *Dispatcher) tryTarget(
 	start, attemptStart time.Time,
 ) (done bool, err error) {
 
-	reader, err := target.Provider.Stream(ctx, req)
+	attemptReq := *req
+	attemptReq.Model = target.Model
+	reader, err := target.Provider.Stream(ctx, &attemptReq)
 	if err != nil {
 		return false, err
 	}

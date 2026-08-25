@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/harrison542002/go-route/internal/core/domains"
 	"github.com/harrison542002/go-route/internal/core/sse"
 	"github.com/harrison542002/go-route/internal/ports"
 )
@@ -12,17 +13,19 @@ import (
 type ClientStream struct {
 	w          http.ResponseWriter
 	rc         *http.ResponseController
-	decisionID string
+	decisionID domains.DecisionID
 	committed  bool
+	stream     bool
 }
 
 var _ ports.ClientStream = (*ClientStream)(nil)
 
-func NewClientStream(w http.ResponseWriter, decisionID string) *ClientStream {
+func NewClientStream(w http.ResponseWriter, id domains.DecisionID, stream bool) *ClientStream {
 	return &ClientStream{
 		w:          w,
 		rc:         http.NewResponseController(w),
-		decisionID: decisionID,
+		decisionID: id,
+		stream:     stream,
 	}
 }
 
@@ -33,19 +36,24 @@ func (c *ClientStream) Commit() error {
 	c.committed = true
 
 	h := c.w.Header()
-	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("Connection", "keep-alive")
 
-	// nginx and several ingress controllers buffer proxied responses by
-	// default, which turns a stream into one lump delivered at the end.
-	h.Set("X-Accel-Buffering", "no")
+	if c.stream {
+		h.Set("Content-Type", "text/event-stream")
+		h.Set("Cache-Control", "no-cache")
+		h.Set("Connection", "keep-alive")
+
+		// nginx and several ingress controllers buffer proxied responses by
+		// default, which turns a stream into one lump delivered at the end.
+		h.Set("X-Accel-Buffering", "no")
+	} else {
+		h.Set("Content-Type", "application/json")
+	}
 
 	// The decision ID can be sent now because it is generated before
 	// dispatch. Cost cannot: it is not known until the stream ends, and
 	// HTTP trailers are poorly supported by client SDKs. Cost lives in
 	// the decision log, retrievable via `go-route explain`.
-	h.Set("X-Go-Route-Decision-Id", c.decisionID)
+	h.Set("X-Go-Route-Decision-Id", c.decisionID.String())
 
 	c.w.WriteHeader(http.StatusOK)
 
@@ -53,6 +61,10 @@ func (c *ClientStream) Commit() error {
 }
 
 func (c *ClientStream) Send(ev ports.StreamEvent) error {
+	if !c.stream {
+		_, err := c.w.Write(ev.Raw)
+		return err
+	}
 	if !c.committed {
 		return fmt.Errorf("httpapi: Send before Commit")
 	}
