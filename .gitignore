@@ -32,7 +32,9 @@ go.work.sum
 # .vscode/
 
 # test files
-configs
+# Ignore local configs, but keep the checked-in example.
+go-route.yaml
+!configs/go-route.example.yaml
 startup-script
 
 # python
