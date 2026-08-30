@@ -26,6 +26,7 @@ type Sink struct {
 	BufferSize    int           `yaml:"buffer_size"`
 	BatchSize     int           `yaml:"batch_size"`
 	FlushInterval time.Duration `yaml:"flush_interval"`
+	DSN           string        `yaml:"dsn"`
 }
 
 type Provider struct {
@@ -164,7 +165,7 @@ func (c *Config) validate() error {
 	}
 
 	switch c.Sink.Type {
-	case "log", "memory", "none":
+	case "log", "postgresql", "none":
 	default:
 		errs = append(errs, fmt.Sprintf("sink: unknown type %q (log, memory, none)", c.Sink.Type))
 	}

@@ -1,8 +1,15 @@
 listen: ":4000"
 
 sink:
-  # currently the sink type is only in memory, log. (in future we will have postgresql)
   type: log
+
+# Uncomment the config below to use postgresql to store log
+# sink:
+#   type: postgres
+#   dsn: ${DATABASE_URL}
+#   buffer_size: 4096
+#   batch_size: 100
+#   flush_interval: 1s
 
 providers:
   openai:

@@ -41,7 +41,10 @@ func run() error {
 		return err
 	}
 
-	application, err := bootstrap.Build(cfg)
+	applicationCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	application, err := bootstrap.Build(applicationCtx, cfg)
 	if err != nil {
 		return err
 	}
@@ -99,6 +102,11 @@ func run() error {
 	defer cancelFlush()
 	if err := application.Sink.Flush(flushCtx); err != nil {
 		slog.Error("sink flush failed; records lost", "err", err)
+	}
+
+	// close after final write
+	if err := application.Close(); err != nil {
+		slog.Error("close failed", "err", err)
 	}
 
 	slog.Info("shutdown complete")

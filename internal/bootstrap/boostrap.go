@@ -1,12 +1,12 @@
-// Package boostrap is the composition root: the single place that decides
+// Package bootstrap is the composition root: the single place that decides
 // which concrete adapters satisfy which ports.
 package bootstrap
 
 import (
+	"context"
 	"time"
 
 	"github.com/harrison542002/go-route/internal/adapters/inbound/httpapi"
-	"github.com/harrison542002/go-route/internal/adapters/outbound/sink"
 	"github.com/harrison542002/go-route/internal/config"
 	"github.com/harrison542002/go-route/internal/ports"
 	"github.com/harrison542002/go-route/internal/usecases/dispatch"
@@ -16,11 +16,10 @@ import (
 type App struct {
 	Handler *httpapi.Handler
 	Sink    ports.DecisionSink
-	Memory  *sink.MemoryWriter
 	Close   func() error
 }
 
-func Build(cfg *config.Config) (*App, error) {
+func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	providers, err := buildProviders(cfg)
 	if err != nil {
 		return nil, err
@@ -31,8 +30,8 @@ func Build(cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
-	decisionSink, mem, err := newSinkBuilder().
-		withDestination(cfg.Sink).
+	builtSink, err := newSinkBuilder().
+		withDestination(ctx, cfg.Sink).
 		withPricing(cfg.Pricing).
 		build()
 
@@ -41,9 +40,8 @@ func Build(cfg *config.Config) (*App, error) {
 	}
 
 	return &App{
-		Handler: httpapi.NewHandler(table, resolver, dispatch.New(time.Now), decisionSink, time.Now),
-		Memory:  mem,
-		Sink:    decisionSink,
-		Close:   func() error { return nil },
+		Handler: httpapi.NewHandler(table, resolver, dispatch.New(time.Now), builtSink.Sink, time.Now),
+		Sink:    builtSink.Sink,
+		Close:   builtSink.Close,
 	}, nil
 }

@@ -13,10 +13,6 @@ import (
 	"github.com/harrison542002/go-route/internal/ports"
 )
 
-type Writer interface {
-	Write(ctx context.Context, batch []domains.RoutingDecision) error
-}
-
 type Config struct {
 	BufferSize    int
 	BatchSize     int

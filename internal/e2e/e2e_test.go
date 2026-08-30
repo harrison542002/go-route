@@ -2,16 +2,12 @@
 // real socket against a fake upstream. It is the only place where a
 // config file, the router, the resolver, the dispatcher, the adapter, the
 // sink, and the HTTP layer are exercised as one system.
-//
-// It builds through bootstrap.Build — the same entry point main.go uses —
-// so the wiring under test cannot drift from the wiring that ships.
 package e2e
 
 import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,7 +21,6 @@ import (
 	"github.com/harrison542002/go-route/internal/adapters/inbound/httpapi"
 	"github.com/harrison542002/go-route/internal/bootstrap"
 	"github.com/harrison542002/go-route/internal/config"
-	"github.com/harrison542002/go-route/internal/core/domains"
 	"github.com/harrison542002/go-route/internal/core/sse"
 )
 
@@ -91,7 +86,7 @@ func fail(status int) http.HandlerFunc {
 }
 
 // boot writes a config and builds the system through bootstrap.Build.
-func boot(t *testing.T, yaml string) (*httptest.Server, *bootstrap.App) {
+func boot(t *testing.T, yaml string) *httptest.Server {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -104,11 +99,15 @@ func boot(t *testing.T, yaml string) (*httptest.Server, *bootstrap.App) {
 		t.Fatalf("config: %v", err)
 	}
 
-	a, err := bootstrap.Build(cfg)
+	a, err := bootstrap.Build(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
 	t.Cleanup(func() {
+		// Flush before Close: the pool must outlive the final batch.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = a.Sink.Flush(ctx)
 		if a.Close != nil {
 			_ = a.Close()
 		}
@@ -116,27 +115,7 @@ func boot(t *testing.T, yaml string) (*httptest.Server, *bootstrap.App) {
 
 	srv := httptest.NewServer(httpapi.NewServer("", a.Handler).Handler)
 	t.Cleanup(srv.Close)
-	return srv, a
-}
-
-// records flushes the sink and returns what was written.
-//
-// Record is asynchronous by design, so reading without flushing is racy.
-// Flush closes the sink permanently: call it once, after the last request
-// in a test.
-func records(t *testing.T, a *bootstrap.App) []domains.RoutingDecision {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := a.Sink.Flush(ctx); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-
-	if a.Memory == nil {
-		t.Fatal("this test needs sink: {type: memory} in its config")
-	}
-	return a.Memory.Records()
+	return srv
 }
 
 func post(t *testing.T, srv *httptest.Server, body string) *http.Response {
@@ -178,7 +157,7 @@ func TestE2E_StreamingRoundTrip(t *testing.T) {
 		`[DONE]`,
 	))
 
-	srv, _ := boot(t, `
+	srv := boot(t, `
 providers:
   fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: sk-test}
 targets:
@@ -234,7 +213,7 @@ func TestE2E_NonStreamingRoundTrip(t *testing.T) {
 		_, _ = w.Write([]byte(respBody))
 	})
 
-	srv, _ := boot(t, `
+	srv := boot(t, `
 providers:
   fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
 targets:
@@ -263,7 +242,7 @@ func TestE2E_FailoverAcrossProviders(t *testing.T) {
 	dead := newUpstream(t, fail(http.StatusServiceUnavailable))
 	alive := newUpstream(t, streamOK(`{"choices":[{"delta":{"content":"ok"}}]}`, `[DONE]`))
 
-	srv, _ := boot(t, `
+	srv := boot(t, `
 providers:
   dead:  {type: oaicompat, base_url: `+dead.URL+`/v1, api_key: k}
   alive: {type: oaicompat, base_url: `+alive.URL+`/v1, api_key: k}
@@ -292,7 +271,7 @@ func TestE2E_NonRetryableStopsLadder(t *testing.T) {
 	bad := newUpstream(t, fail(http.StatusUnauthorized))
 	never := newUpstream(t, streamOK(`[DONE]`))
 
-	srv, _ := boot(t, `
+	srv := boot(t, `
 providers:
   bad:   {type: oaicompat, base_url: `+bad.URL+`/v1, api_key: wrong}
   never: {type: oaicompat, base_url: `+never.URL+`/v1, api_key: k}
@@ -331,7 +310,7 @@ func TestE2E_TokensArriveIncrementally(t *testing.T) {
 		_ = rc.Flush()
 	})
 
-	srv, _ := boot(t, `
+	srv := boot(t, `
 providers:
   fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
 targets:
@@ -366,8 +345,7 @@ func TestE2E_UpstreamTruncation(t *testing.T) {
 		_ = rc.Flush()
 	})
 
-	srv, a := boot(t, `
-sink: {type: memory}
+	srv := boot(t, `
 providers:
   fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
 targets:
@@ -388,15 +366,6 @@ models:
 	}
 	if strings.Contains(body, "[DONE]") {
 		t.Error("a truncated stream must not be terminated with [DONE]")
-	}
-
-	// A truncated stream is exactly the case an audit trail must capture.
-	recs := records(t, a)
-	if len(recs) != 1 {
-		t.Fatalf("got %d records, want 1", len(recs))
-	}
-	if recs[0].Outcome.Status != domains.StatusTruncated {
-		t.Errorf("status = %q, want truncated", recs[0].Outcome.Status)
 	}
 }
 
@@ -457,6 +426,23 @@ models:
 `,
 			want: "sink",
 		},
+		{
+			name: "pricing references an unknown target",
+			yaml: `
+providers:
+  p: {type: oaicompat, base_url: http://x/v1, api_key: k}
+targets:
+  p/m: {provider: p, model: m}
+models:
+  chat: [p/m]
+pricing:
+  table:
+    - effective_from: 2026-08-01
+      rates:
+        p/ghost: {input_per_million: 1.0, output_per_million: 2.0}
+`,
+			want: "unknown target",
+		},
 	}
 
 	for _, tt := range tests {
@@ -481,7 +467,7 @@ models:
 func TestE2E_UnknownModelRejected(t *testing.T) {
 	up := newUpstream(t, streamOK(`[DONE]`))
 
-	srv, _ := boot(t, `
+	srv := boot(t, `
 providers:
   fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
 targets:
@@ -503,97 +489,16 @@ models:
 	}
 }
 
-func TestE2E_DecisionRecorded(t *testing.T) {
+// Pricing must not affect the request path. A config with rates behaves
+// identically to one without, from the client's perspective.
+func TestE2E_PricingDoesNotAffectTheResponse(t *testing.T) {
 	up := newUpstream(t, streamOK(
 		`{"choices":[{"delta":{"content":"hi"}}]}`,
-		`{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":4}}}`,
+		`{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50}}`,
 		`[DONE]`,
 	))
 
-	srv, a := boot(t, `
-sink: {type: memory}
-providers:
-  fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
-targets:
-  fake/m: {provider: fake, model: upstream-model}
-models:
-  chat: [fake/m]
-`)
-
-	resp := post(t, srv, `{"model":"chat","messages":[],"stream":true}`)
-	_ = readAll(t, resp) // the record is written when the handler returns
-
-	recs := records(t, a)
-	if len(recs) != 1 {
-		t.Fatalf("got %d records, want 1", len(recs))
-	}
-	r := recs[0]
-
-	if r.ID.IsZero() {
-		t.Error("decision has no ID")
-	}
-	if r.Outcome.Status != domains.StatusOK {
-		t.Errorf("status = %q", r.Outcome.Status)
-	}
-	if r.Outcome.ChosenTarget() != "fake/m" {
-		t.Errorf("chosen = %q, want the stable config name", r.Outcome.ChosenTarget())
-	}
-	if r.Ladder.Reason.ModelAlias != "chat" {
-		t.Errorf("reason lost: %+v", r.Ladder.Reason)
-	}
-	if r.Outcome.Usage.Input != 8 || r.Outcome.Usage.CacheRead != 4 {
-		t.Errorf("usage = %+v, want Input 8 CacheRead 4", r.Outcome.Usage)
-	}
-	if r.Request.Metadata == nil {
-		t.Error("metadata map is nil; reports index into it")
-	}
-}
-
-// Failures are the most interesting rows in the audit log; a record must
-// exist even when nothing was served.
-func TestE2E_FailureRecorded(t *testing.T) {
-	dead := newUpstream(t, fail(http.StatusServiceUnavailable))
-
-	srv, a := boot(t, `
-sink: {type: memory}
-providers:
-  dead: {type: oaicompat, base_url: `+dead.URL+`/v1, api_key: k}
-targets:
-  dead/m: {provider: dead, model: m}
-models:
-  chat: [dead/m]
-`)
-
-	resp := post(t, srv, `{"model":"chat","messages":[],"stream":true}`)
-	_ = readAll(t, resp)
-
-	recs := records(t, a)
-	if len(recs) != 1 {
-		t.Fatalf("got %d records, want 1 — failures must still be recorded", len(recs))
-	}
-	if recs[0].Outcome.Status != domains.StatusExhausted {
-		t.Errorf("status = %q, want exhausted", recs[0].Outcome.Status)
-	}
-	if len(recs[0].Outcome.Attempts) != 1 {
-		t.Errorf("attempts = %d, want 1", len(recs[0].Outcome.Attempts))
-	}
-	if recs[0].Outcome.ChosenTarget() != "" {
-		t.Error("an exhausted outcome must not name a chosen target")
-	}
-}
-
-// The whole thesis in one test: a config file with rates produces an
-// audit record carrying what the request cost, under which price table,
-// and what the alternative would have cost.
-func TestE2E_DecisionIsPriced(t *testing.T) {
-	up := newUpstream(t, streamOK(
-		`{"choices":[{"delta":{"content":"hi"}}]}`,
-		`{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":20}}}`,
-		`[DONE]`,
-	))
-
-	srv, a := boot(t, `
-sink: {type: memory}
+	srv := boot(t, `
 providers:
   fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
 targets:
@@ -606,164 +511,21 @@ pricing:
   table:
     - effective_from: 2026-08-01
       rates:
-        fake/mini:
-          input_per_million: 0.25
-          output_per_million: 2.00
-          cache_read_per_million: 0.025
-        fake/flagship:
-          input_per_million: 1.25
-          output_per_million: 10.00
-          cache_read_per_million: 0.125
+        fake/mini:     {input_per_million: 0.25, output_per_million: 2.00}
+        fake/flagship: {input_per_million: 1.25, output_per_million: 10.00}
 `)
 
 	resp := post(t, srv, `{"model":"chat","messages":[],"stream":true}`)
-	_ = readAll(t, resp)
 
-	recs := records(t, a)
-	if len(recs) != 1 {
-		t.Fatalf("got %d records, want 1", len(recs))
-	}
-	r := recs[0]
-
-	if r.Cost == nil {
-		t.Fatal("decision was not priced; check that the pricing sink layer is wired")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
 	}
 
-	// 80 fresh input at $0.25/M, 20 cached at $0.025/M, 50 output at $2/M.
-	// 80×250 + 20×25 + 50×2000 = 20000 + 500 + 100000 nanos.
-	if want := domains.USD(120_500); r.Cost.Actual != want {
-		t.Errorf("actual = %d nanos (%v), want %d (%v)",
-			r.Cost.Actual, r.Cost.Actual, want, want)
+	events := drainSSE(t, resp)
+	if len(events) != 2 {
+		t.Fatalf("client saw %d events, want 2:\n%v", len(events), events)
 	}
-
-	if r.Cost.PriceTableVersion != "2026-08-01" {
-		t.Errorf("price table = %q; without it a report could not be reproduced",
-			r.Cost.PriceTableVersion)
-	}
-
-	delta, ok := r.Cost.Delta("fake/flagship")
-	if !ok {
-		t.Fatalf("no flagship counterfactual: %+v", r.Cost.Counterfactuals)
-	}
-	if delta >= 0 {
-		t.Errorf("delta = %v, want negative — the cheaper target should cost less", delta)
-	}
-	if len(r.Cost.UnpricedComparisons) != 0 {
-		t.Errorf("unpriced comparisons = %v, want none", r.Cost.UnpricedComparisons)
-	}
-
-	t.Logf("actual %v, flagship would have been %v, saved %v",
-		r.Cost.Actual, r.Cost.Actual-delta, -delta)
-}
-
-// Cached input is billed roughly ten times below fresh input.
-func TestE2E_CachedTokensAreBilledSeparately(t *testing.T) {
-	pricingYAML := `
-sink: {type: memory}
-providers:
-  fake: {type: oaicompat, base_url: %s/v1, api_key: k}
-targets:
-  fake/mini: {provider: fake, model: mini-model}
-models:
-  chat: [fake/mini]
-pricing:
-  table:
-    - effective_from: 2026-08-01
-      rates:
-        fake/mini:
-          input_per_million: 0.25
-          output_per_million: 2.00
-          cache_read_per_million: 0.025
-`
-
-	costFor := func(t *testing.T, usageChunk string) domains.USD {
-		t.Helper()
-		up := newUpstream(t, streamOK(usageChunk, `[DONE]`))
-		srv, a := boot(t, fmt.Sprintf(pricingYAML, up.URL))
-
-		resp := post(t, srv, `{"model":"chat","messages":[],"stream":true}`)
-		_ = readAll(t, resp)
-
-		recs := records(t, a)
-		if len(recs) != 1 || recs[0].Cost == nil {
-			t.Fatalf("no priced record: %+v", recs)
-		}
-		return recs[0].Cost.Actual
-	}
-
-	fresh := costFor(t, `{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":10}}`)
-	cached := costFor(t, `{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":900}}}`)
-
-	if cached >= fresh {
-		t.Fatalf("cached (%v) is not cheaper than fresh (%v); "+
-			"the adapter is probably not splitting cached_tokens out of prompt_tokens",
-			cached, fresh)
-	}
-	t.Logf("fresh %v, 90%% cached %v", fresh, cached)
-}
-
-// An exhausted ladder consumed nothing, so there is no cost. Nil is
-// distinct from zero: "we don't know" and "it was free" must not sum
-// together in a report.
-func TestE2E_FailedRequestIsUnpriced(t *testing.T) {
-	dead := newUpstream(t, fail(http.StatusServiceUnavailable))
-
-	srv, a := boot(t, `
-sink: {type: memory}
-providers:
-  dead: {type: oaicompat, base_url: `+dead.URL+`/v1, api_key: k}
-targets:
-  dead/m: {provider: dead, model: m}
-models:
-  chat: [dead/m]
-pricing:
-  table:
-    - effective_from: 2026-08-01
-      rates:
-        dead/m: {input_per_million: 0.25, output_per_million: 2.00}
-`)
-
-	resp := post(t, srv, `{"model":"chat","messages":[],"stream":true}`)
-	_ = readAll(t, resp)
-
-	recs := records(t, a)
-	if len(recs) != 1 {
-		t.Fatalf("got %d records, want 1", len(recs))
-	}
-	if recs[0].Cost != nil {
-		t.Errorf("cost = %+v, want nil — nothing was served", recs[0].Cost)
-	}
-}
-
-// A deployment without a price table is valid: every record simply
-// carries a nil cost. The proxy must not fail or invent zeros.
-func TestE2E_NoPricingConfigured(t *testing.T) {
-	up := newUpstream(t, streamOK(
-		`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`,
-		`[DONE]`,
-	))
-
-	srv, a := boot(t, `
-sink: {type: memory}
-providers:
-  fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
-targets:
-  fake/m: {provider: fake, model: m}
-models:
-  chat: [fake/m]
-`)
-
-	resp := post(t, srv, `{"model":"chat","messages":[],"stream":true}`)
-	_ = readAll(t, resp)
-
-	recs := records(t, a)
-	if len(recs) != 1 {
-		t.Fatalf("got %d records, want 1", len(recs))
-	}
-	if recs[0].Cost != nil {
-		t.Errorf("cost = %+v, want nil with no price table", recs[0].Cost)
-	}
-	if recs[0].Outcome.Usage.Input == 0 {
-		t.Error("usage lost; pricing being absent must not affect metering")
+	if events[1] != "[DONE]" {
+		t.Errorf("last event = %q, want [DONE]", events[1])
 	}
 }

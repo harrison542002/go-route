@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"strings"
-	"sync"
 
 	"github.com/harrison542002/go-route/internal/core/domains"
 )
@@ -46,25 +45,6 @@ func (SlogWriter) Write(_ context.Context, batch []domains.RoutingDecision) erro
 	return nil
 }
 
-// MemoryWriter retains records for tests.
-type MemoryWriter struct {
-	mu      sync.Mutex
-	records []domains.RoutingDecision
-}
-
-func (m *MemoryWriter) Write(_ context.Context, batch []domains.RoutingDecision) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.records = append(m.records, batch...)
-	return nil
-}
-
-func (m *MemoryWriter) Records() []domains.RoutingDecision {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]domains.RoutingDecision(nil), m.records...)
-}
-
 func attemptTrail(o domains.Outcome) string {
 	parts := make([]string, 0, len(o.Attempts))
 	for _, a := range o.Attempts {
@@ -76,5 +56,3 @@ func attemptTrail(o domains.Outcome) string {
 	}
 	return strings.Join(parts, " ")
 }
-
-// TODO: PostgresWriter Later
