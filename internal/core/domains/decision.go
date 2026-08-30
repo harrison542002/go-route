@@ -32,15 +32,6 @@ type RequestSummary struct {
 	Metadata       map[string]string
 }
 
-// CostBreakdown is reserved for the pricing layer. PriceTableRef records
-// which dated price table was applied, so a provider changing prices does
-// not silently rewrite the cost of past traffic.
-type CostBreakdown struct {
-	Actual        USD
-	PriceTableRef string
-	// Counterfactuals []Counterfactual — added with the pricing layer.
-}
-
 func NewRoutingDecision(
 	id DecisionID,
 	facts RequestFacts,

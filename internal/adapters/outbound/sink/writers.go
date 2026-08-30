@@ -3,30 +3,45 @@ package sink
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/harrison542002/go-route/internal/core/domains"
 )
 
-// SlogWriter emits records as structured logs.
 type SlogWriter struct{}
 
 func (SlogWriter) Write(_ context.Context, batch []domains.RoutingDecision) error {
 	for _, d := range batch {
-		slog.Info("decision",
+		attrs := []any{
 			"id", d.ID.String(),
-			"tenant", string(d.Tenant),
 			"model", d.Request.RequestedModel,
-			"reason", string(d.Ladder.Reason.Kind),
+			"chosen", d.Outcome.ChosenTarget(),
 			"status", string(d.Outcome.Status),
-			"attempts", len(d.Outcome.Attempts),
+			"trail", attemptTrail(d.Outcome),
 			"input_tokens", d.Outcome.Usage.Input,
 			"cached_tokens", d.Outcome.Usage.CacheRead,
 			"output_tokens", d.Outcome.Usage.Output,
 			"ttft_ms", d.Outcome.TTFTMs,
 			"total_ms", d.Outcome.TotalMs,
-			"chosen", domains.Outcome.ChosenTarget(d.Outcome),
-		)
+		}
+
+		if d.Cost == nil {
+			attrs = append(attrs, "cost", "unpriced")
+		} else {
+			attrs = append(attrs,
+				"cost", d.Cost.Actual.String(),
+				"price_table", d.Cost.PriceTableVersion,
+			)
+			for _, cf := range d.Cost.Counterfactuals {
+				attrs = append(attrs, "vs_"+cf.Target, cf.Cost.String())
+			}
+			if len(d.Cost.UnpricedComparisons) > 0 {
+				attrs = append(attrs, "unpriced_comparisons", d.Cost.UnpricedComparisons)
+			}
+		}
+
+		slog.Info("decision", attrs...)
 	}
 	return nil
 }
@@ -48,6 +63,18 @@ func (m *MemoryWriter) Records() []domains.RoutingDecision {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]domains.RoutingDecision(nil), m.records...)
+}
+
+func attemptTrail(o domains.Outcome) string {
+	parts := make([]string, 0, len(o.Attempts))
+	for _, a := range o.Attempts {
+		if a.Failure == nil {
+			parts = append(parts, a.Target+":ok")
+			continue
+		}
+		parts = append(parts, a.Target+":"+a.Failure.Kind)
+	}
+	return strings.Join(parts, " ")
 }
 
 // TODO: PostgresWriter Later

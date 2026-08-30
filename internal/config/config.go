@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/harrison542002/go-route/internal/core/domains"
 	"gopkg.in/yaml.v3"
 )
 
@@ -17,6 +18,7 @@ type Config struct {
 	Targets   map[string]Target   `yaml:"targets"`
 	Models    map[string][]string `yaml:"models"`
 	Sink      Sink                `yaml:"sink"`
+	Pricing   Pricing             `yaml:"pricing"`
 }
 
 type Sink struct {
@@ -32,6 +34,29 @@ type Provider struct {
 	APIKey               string            `yaml:"api_key"`
 	DisableStreamOptions bool              `yaml:"disable_stream_options"`
 	ExtraHeaders         map[string]string `yaml:"extra_headers"`
+}
+
+type PriceBlock struct {
+	EffectiveFrom time.Time             `yaml:"effective_from"`
+	Source        string                `yaml:"source,omitempty"`
+	Rates         map[string]RateConfig `yaml:"rates"`
+}
+
+type RateConfig struct {
+	// Free must be flagged explicitly
+	Free bool `yaml:"free,omitempty"`
+
+	InputPerMillion      float64 `yaml:"input_per_million"`
+	OutputPerMillion     float64 `yaml:"output_per_million"`
+	CacheReadPerMillion  float64 `yaml:"cache_read_per_million,omitempty"`
+	CacheWritePerMillion float64 `yaml:"cache_write_per_million,omitempty"`
+
+	Note string `yaml:"note,omitempty"`
+}
+
+type Pricing struct {
+	CompareAgainst []string     `yaml:"compare_against"`
+	Table          []PriceBlock `yaml:"table"`
 }
 
 type Target struct {
@@ -75,6 +100,7 @@ func Load(path string) (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+
 	return &cfg, nil
 }
 
@@ -143,9 +169,71 @@ func (c *Config) validate() error {
 		errs = append(errs, fmt.Sprintf("sink: unknown type %q (log, memory, none)", c.Sink.Type))
 	}
 
+	errs = append(errs, c.validatePricing()...)
+
 	if len(errs) > 0 {
 		sort.Strings(errs)
 		return fmt.Errorf("config: invalid:\n  - %s", strings.Join(errs, "\n  - "))
 	}
 	return nil
+}
+
+func (c *Config) validatePricing() []string {
+	var errs []string
+
+	if len(c.Pricing.Table) == 0 {
+		return nil
+	}
+
+	seen := map[string]bool{}
+	for _, b := range c.Pricing.Table {
+		if b.EffectiveFrom.IsZero() {
+			errs = append(errs, "pricing: a block has no effective_from")
+			continue
+		}
+		key := b.EffectiveFrom.Format("2006-01-02")
+		if seen[key] {
+			errs = append(errs, fmt.Sprintf("pricing: two blocks share effective_from %s", key))
+		}
+		seen[key] = true
+
+		for name, rc := range b.Rates {
+			if _, ok := c.Targets[name]; !ok {
+				errs = append(errs, fmt.Sprintf("pricing %s: unknown target %q", key, name))
+			}
+			if !rc.Free && rc.InputPerMillion == 0 && rc.OutputPerMillion == 0 {
+				errs = append(errs, fmt.Sprintf(
+					"pricing %s: target %q has no rates and is not marked free", key, name))
+			}
+			if err := rc.ToRates().Validate(); err != nil {
+				errs = append(errs, fmt.Sprintf("pricing %s: target %q: %v", key, name, err))
+			}
+		}
+	}
+
+	if len(c.Pricing.Table) > 1 {
+		latest := c.Pricing.Table[len(c.Pricing.Table)-1]
+		for _, b := range c.Pricing.Table[:len(c.Pricing.Table)-1] {
+			for name := range b.Rates {
+				if _, ok := latest.Rates[name]; !ok {
+					errs = append(errs, fmt.Sprintf(
+						"pricing: target %q priced in an earlier block but missing from the latest", name))
+				}
+			}
+		}
+	}
+
+	return errs
+}
+
+func (rc RateConfig) ToRates() domains.Rates {
+	if rc.Free {
+		return domains.Rates{}
+	}
+	return domains.Rates{
+		Input:      domains.PerMillionTokens(domains.FromDollars(rc.InputPerMillion)),
+		Output:     domains.PerMillionTokens(domains.FromDollars(rc.OutputPerMillion)),
+		CacheRead:  domains.PerMillionTokens(domains.FromDollars(rc.CacheReadPerMillion)),
+		CacheWrite: domains.PerMillionTokens(domains.FromDollars(rc.CacheWritePerMillion)),
+	}
 }

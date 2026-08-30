@@ -35,6 +35,7 @@ type Handler struct {
 	resolver   Resolver
 	dispatcher *dispatch.Dispatcher
 	sink       ports.DecisionSink
+	pricer     ports.PricingTable
 	now        func() time.Time
 }
 
@@ -87,5 +88,6 @@ func (h *Handler) Completions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFor(outcome), lastMessage(outcome), "upstream_error")
 	}
 
-	h.sink.Record(domains.NewRoutingDecision(decisionID, facts, ladder, outcome))
+	decision := domains.NewRoutingDecision(decisionID, facts, ladder, outcome)
+	h.sink.Record(decision)
 }

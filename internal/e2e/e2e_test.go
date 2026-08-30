@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -578,5 +579,191 @@ models:
 	}
 	if recs[0].Outcome.ChosenTarget() != "" {
 		t.Error("an exhausted outcome must not name a chosen target")
+	}
+}
+
+// The whole thesis in one test: a config file with rates produces an
+// audit record carrying what the request cost, under which price table,
+// and what the alternative would have cost.
+func TestE2E_DecisionIsPriced(t *testing.T) {
+	up := newUpstream(t, streamOK(
+		`{"choices":[{"delta":{"content":"hi"}}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":20}}}`,
+		`[DONE]`,
+	))
+
+	srv, a := boot(t, `
+sink: {type: memory}
+providers:
+  fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
+targets:
+  fake/mini:     {provider: fake, model: mini-model}
+  fake/flagship: {provider: fake, model: flagship-model}
+models:
+  chat: [fake/mini]
+pricing:
+  compare_against: [fake/flagship]
+  table:
+    - effective_from: 2026-08-01
+      rates:
+        fake/mini:
+          input_per_million: 0.25
+          output_per_million: 2.00
+          cache_read_per_million: 0.025
+        fake/flagship:
+          input_per_million: 1.25
+          output_per_million: 10.00
+          cache_read_per_million: 0.125
+`)
+
+	resp := post(t, srv, `{"model":"chat","messages":[],"stream":true}`)
+	_ = readAll(t, resp)
+
+	recs := records(t, a)
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	r := recs[0]
+
+	if r.Cost == nil {
+		t.Fatal("decision was not priced; check that the pricing sink layer is wired")
+	}
+
+	// 80 fresh input at $0.25/M, 20 cached at $0.025/M, 50 output at $2/M.
+	// 80×250 + 20×25 + 50×2000 = 20000 + 500 + 100000 nanos.
+	if want := domains.USD(120_500); r.Cost.Actual != want {
+		t.Errorf("actual = %d nanos (%v), want %d (%v)",
+			r.Cost.Actual, r.Cost.Actual, want, want)
+	}
+
+	if r.Cost.PriceTableVersion != "2026-08-01" {
+		t.Errorf("price table = %q; without it a report could not be reproduced",
+			r.Cost.PriceTableVersion)
+	}
+
+	delta, ok := r.Cost.Delta("fake/flagship")
+	if !ok {
+		t.Fatalf("no flagship counterfactual: %+v", r.Cost.Counterfactuals)
+	}
+	if delta >= 0 {
+		t.Errorf("delta = %v, want negative — the cheaper target should cost less", delta)
+	}
+	if len(r.Cost.UnpricedComparisons) != 0 {
+		t.Errorf("unpriced comparisons = %v, want none", r.Cost.UnpricedComparisons)
+	}
+
+	t.Logf("actual %v, flagship would have been %v, saved %v",
+		r.Cost.Actual, r.Cost.Actual-delta, -delta)
+}
+
+// Cached input is billed roughly ten times below fresh input.
+func TestE2E_CachedTokensAreBilledSeparately(t *testing.T) {
+	pricingYAML := `
+sink: {type: memory}
+providers:
+  fake: {type: oaicompat, base_url: %s/v1, api_key: k}
+targets:
+  fake/mini: {provider: fake, model: mini-model}
+models:
+  chat: [fake/mini]
+pricing:
+  table:
+    - effective_from: 2026-08-01
+      rates:
+        fake/mini:
+          input_per_million: 0.25
+          output_per_million: 2.00
+          cache_read_per_million: 0.025
+`
+
+	costFor := func(t *testing.T, usageChunk string) domains.USD {
+		t.Helper()
+		up := newUpstream(t, streamOK(usageChunk, `[DONE]`))
+		srv, a := boot(t, fmt.Sprintf(pricingYAML, up.URL))
+
+		resp := post(t, srv, `{"model":"chat","messages":[],"stream":true}`)
+		_ = readAll(t, resp)
+
+		recs := records(t, a)
+		if len(recs) != 1 || recs[0].Cost == nil {
+			t.Fatalf("no priced record: %+v", recs)
+		}
+		return recs[0].Cost.Actual
+	}
+
+	fresh := costFor(t, `{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":10}}`)
+	cached := costFor(t, `{"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":900}}}`)
+
+	if cached >= fresh {
+		t.Fatalf("cached (%v) is not cheaper than fresh (%v); "+
+			"the adapter is probably not splitting cached_tokens out of prompt_tokens",
+			cached, fresh)
+	}
+	t.Logf("fresh %v, 90%% cached %v", fresh, cached)
+}
+
+// An exhausted ladder consumed nothing, so there is no cost. Nil is
+// distinct from zero: "we don't know" and "it was free" must not sum
+// together in a report.
+func TestE2E_FailedRequestIsUnpriced(t *testing.T) {
+	dead := newUpstream(t, fail(http.StatusServiceUnavailable))
+
+	srv, a := boot(t, `
+sink: {type: memory}
+providers:
+  dead: {type: oaicompat, base_url: `+dead.URL+`/v1, api_key: k}
+targets:
+  dead/m: {provider: dead, model: m}
+models:
+  chat: [dead/m]
+pricing:
+  table:
+    - effective_from: 2026-08-01
+      rates:
+        dead/m: {input_per_million: 0.25, output_per_million: 2.00}
+`)
+
+	resp := post(t, srv, `{"model":"chat","messages":[],"stream":true}`)
+	_ = readAll(t, resp)
+
+	recs := records(t, a)
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	if recs[0].Cost != nil {
+		t.Errorf("cost = %+v, want nil — nothing was served", recs[0].Cost)
+	}
+}
+
+// A deployment without a price table is valid: every record simply
+// carries a nil cost. The proxy must not fail or invent zeros.
+func TestE2E_NoPricingConfigured(t *testing.T) {
+	up := newUpstream(t, streamOK(
+		`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`,
+		`[DONE]`,
+	))
+
+	srv, a := boot(t, `
+sink: {type: memory}
+providers:
+  fake: {type: oaicompat, base_url: `+up.URL+`/v1, api_key: k}
+targets:
+  fake/m: {provider: fake, model: m}
+models:
+  chat: [fake/m]
+`)
+
+	resp := post(t, srv, `{"model":"chat","messages":[],"stream":true}`)
+	_ = readAll(t, resp)
+
+	recs := records(t, a)
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	if recs[0].Cost != nil {
+		t.Errorf("cost = %+v, want nil with no price table", recs[0].Cost)
+	}
+	if recs[0].Outcome.Usage.Input == 0 {
+		t.Error("usage lost; pricing being absent must not affect metering")
 	}
 }

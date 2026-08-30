@@ -31,15 +31,19 @@ func Build(cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
-	s, mem, err := buildSink(cfg.Sink)
+	decisionSink, mem, err := newSinkBuilder().
+		withDestination(cfg.Sink).
+		withPricing(cfg.Pricing).
+		build()
+
 	if err != nil {
 		return nil, err
 	}
 
 	return &App{
-		Handler: httpapi.NewHandler(table, resolver, dispatch.New(time.Now), s, time.Now),
+		Handler: httpapi.NewHandler(table, resolver, dispatch.New(time.Now), decisionSink, time.Now),
 		Memory:  mem,
-		Sink:    s,
+		Sink:    decisionSink,
 		Close:   func() error { return nil },
 	}, nil
 }

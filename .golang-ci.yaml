@@ -10,3 +10,8 @@ linters-settings:
             desc: "core must not do I/O"
           - pkg: "net/http"
             desc: "core must not know about transport"
+      adapters-are-leaves:
+        files: ["**/internal/adapters/**"]
+        deny:
+          - pkg: "go-route/internal/usecases"
+            desc: "adapters are driven by use cases, not the reverse"
