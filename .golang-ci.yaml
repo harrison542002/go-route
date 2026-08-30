@@ -6,6 +6,7 @@ run:
     - integration
 
 linters:
+  default: none
   enable:
     - depguard
     - govet
