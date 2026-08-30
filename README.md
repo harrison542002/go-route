@@ -128,7 +128,7 @@ afterwards.
 ## Tests
 
 ```bash
-# unit tests
+# unit tests and E2E
 make unit-test
 
 # integration tests

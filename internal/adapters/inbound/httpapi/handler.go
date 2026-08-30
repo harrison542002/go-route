@@ -35,7 +35,6 @@ type Handler struct {
 	resolver   Resolver
 	dispatcher *dispatch.Dispatcher
 	sink       ports.DecisionSink
-	pricer     ports.PricingTable
 	now        func() time.Time
 }
 
