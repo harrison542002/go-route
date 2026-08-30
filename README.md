@@ -88,12 +88,54 @@ commented throughout:
 - **targets** — a provider plus a concrete upstream model name.
 - **models** — the alias clients ask for, mapped to an ordered ladder of
   targets.
-- **sink** — where routing decisions go: `log` (default), `memory`, or `none`.
+- **sink** — where routing decisions go. See [Decision sinks](#decision-sinks).
+
+## Decision sinks
+
+Every routed request produces a decision record: which targets were
+eligible, which one served it, why that one, what it cost, and how long
+it took. The sink is where those records land.
+
+| Type       | Where records go                | Survives restart | Use for                                    |
+|------------|---------------------------------|------------------|--------------------------------------------|
+| `log`      | stdout as structured JSON       | no               | the default; trying go-route out           |
+| `postgres` | a `decisions` table             | yes              | anything you intend to report on           |
+| `none`     | discarded                       | no               | running the proxy with no audit trail      |
+
+```yaml
+sink:
+  type: postgres
+  dsn: ${DATABASE_URL}
+
+  # Records are buffered and written in batches so persistence never
+  # blocks a request. When the buffer fills, records are DROPPED and
+  # counted rather than slowing traffic down. A slow database must not
+  # become a slow proxy.
+  buffer_size: 4096      # records held in memory
+  batch_size: 100        # rows per write
+  flush_interval: 1s     # write a partial batch after this long
+```
+
+`postgres` creates its schema on first connect, so no migration step is
+needed to get started. Drops are logged and counted; if you see them, the
+database is not keeping up and `buffer_size` or `batch_size` needs
+raising.
+
+With `type: none` the proxy still routes and fails over normally. You
+simply lose the ability to explain, report on, or attribute any of it
+afterwards.
 
 ## Tests
 
 ```bash
-go test ./...
+# unit tests
+make unit-test
+
+# integration tests
+make integration-test
+
+# all tests
+make test-all
 ```
 
 There is also a live smoke suite that talks to real providers (it costs
