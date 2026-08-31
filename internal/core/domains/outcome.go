@@ -17,17 +17,17 @@ const (
 
 // Attempt records one target in the failover ladder, successful or not.
 type Attempt struct {
-	Target     string
-	StartedAt  time.Time
-	DurationMs int
-	Failure    *AttemptFailure
+	Target     string          `json:"target"`
+	StartedAt  time.Time       `json:"started_at"`
+	DurationMs int             `json:"duration_ms"`
+	Failure    *AttemptFailure `json:"failure,omitempty"`
 }
 
 type AttemptFailure struct {
-	Kind       string
-	StatusCode int
-	Message    string
-	Retryable  bool
+	Kind       string `json:"kind"`
+	StatusCode int    `json:"status_code,omitempty"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable"`
 }
 
 type Outcome struct {

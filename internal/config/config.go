@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/harrison542002/go-route/internal/core/domains"
+	"github.com/harrison542002/go-route/internal/ports"
 	"gopkg.in/yaml.v3"
 )
 
@@ -95,7 +96,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	if cfg.Sink.Type == "" {
-		cfg.Sink.Type = "log"
+		cfg.Sink.Type = string(ports.LOG)
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -165,7 +166,7 @@ func (c *Config) validate() error {
 	}
 
 	switch c.Sink.Type {
-	case "log", "postgresql", "none":
+	case string(ports.LOG), string(ports.POSTGRES), string(ports.NONE):
 	default:
 		errs = append(errs, fmt.Sprintf("sink: unknown type %q (log, memory, none)", c.Sink.Type))
 	}

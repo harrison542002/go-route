@@ -42,3 +42,22 @@ type PerMillionTokens USD
 func (p PerMillionTokens) Cost(n int) USD {
 	return USD(int64(p) * int64(n) / 1_000_000)
 }
+
+// formatCost renders a cost at a precision that keeps it readable.
+func (u USD) Auto() string {
+	d := u.Dollars()
+	if d < 0 {
+		d = -d
+	}
+
+	switch {
+	case u == 0:
+		return "$0.00"
+	case d < 0.01:
+		return u.Format(6)
+	case d < 1:
+		return u.Format(4)
+	default:
+		return u.Format(2)
+	}
+}

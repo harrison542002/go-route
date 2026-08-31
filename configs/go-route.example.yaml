@@ -1,38 +1,33 @@
 listen: ":4000"
 
-sink:
-  type: log
-
-# Uncomment the config below to use postgresql to store log
 # sink:
-#   type: postgres
-#   dsn: ${DATABASE_URL}
-#   buffer_size: 4096
-#   batch_size: 100
-#   flush_interval: 1s
+#   type: log
+
+sink:
+  type: postgres
+  dsn: ${DATABASE_URL}
+  buffer_size: 4096
+  batch_size: 100
+  flush_interval: 1s
 
 providers:
-  openai:
-    type: oaicompat
-    base_url: https://api.openai.com/v1
-    api_key: ${OPENAI_API_KEY}
-
-
   broken:
     type: oaicompat
     base_url: http://127.0.0.1:1/v1
     api_key: unused
+
+  openai:
+    type: oaicompat
+    base_url: https://api.openai.com/v1
+    api_key: ${OPENAI_API_KEY}
 
   badkey:
     type: oaicompat
     base_url: https://api.openai.com/v1
     api_key: sk-definitely-not-a-real-key
 
+# Target available for each provider
 targets:
-  openai/gpt-5-mini:
-    provider: openai
-    model: gpt-5-mini
-
   broken/dead:
     provider: broken
     model: does-not-matter
@@ -41,14 +36,50 @@ targets:
     provider: badkey
     model: gpt-5-mini
 
-models:
-  direct:
-    - openai/gpt-5-mini
+  openai/gpt-5-mini:
+    provider: openai
+    model: gpt-5-mini
 
+  openai/gpt-5:
+    provider: openai
+    model: gpt-5
+
+# Custom model name with ladder
+models:
   chat:
     - broken/dead
     - openai/gpt-5-mini
-
-  auth-fail:
-    - badkey/gpt-5-mini
+  direct:
     - openai/gpt-5-mini
+  auth-fail:
+      - badkey/gpt-5-mini
+      - openai/gpt-5-mini 
+
+# Pricing table for each target
+pricing:
+  compare_against:
+    - openai/gpt-5
+  table:
+    - effective_from: 2026-08-25
+      rates:
+        openai/gpt-5-mini:
+          input_per_million: 0.25
+          output_per_million: 2.00
+          cache_read_per_million: 0.025
+          cache_write_per_million: 0.3125
+
+        openai/gpt-5:
+          input_per_million: 1.25
+          output_per_million: 10.00
+          cache_read_per_million: 0.125
+
+    - effective_from: 2026-09-01
+      rates:
+        openai/gpt-5-mini:
+          input_per_million: 0.20
+          output_per_million: 1.60
+          cache_read_per_million: 0.020
+        openai/gpt-5:
+          input_per_million: 1.25
+          output_per_million: 10.00
+          cache_read_per_million: 0.125

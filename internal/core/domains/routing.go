@@ -2,10 +2,10 @@ package domains
 
 // TargetRef names one configured place a request can be sent.
 type TargetRef struct {
-	Name          string // "openai/gpt-5-mini"
-	Provider      string
-	UpstreamModel string
-	Region        string // for residency rules
+	Name          string `json:"name"`
+	Provider      string `json:"provider"`
+	UpstreamModel string `json:"upstream_model"`
+	Region        string `json:"region,omitempty"`
 }
 
 // Ladder is an ordered set of targets to attempt, together with the

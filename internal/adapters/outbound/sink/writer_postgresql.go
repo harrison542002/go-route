@@ -88,8 +88,10 @@ func flatten(d domains.RoutingDecision) ([]any, error) {
 		n := int64(d.Cost.Actual)
 		costNanos = &n
 		priceTable = &d.Cost.PriceTableVersion
-		if counterJSON, err = json.Marshal(d.Cost.Counterfactuals); err != nil {
-			return nil, err
+		if len(d.Cost.Counterfactuals) > 0 {
+			if counterJSON, err = json.Marshal(d.Cost.Counterfactuals); err != nil {
+				return nil, err
+			}
 		}
 	}
 

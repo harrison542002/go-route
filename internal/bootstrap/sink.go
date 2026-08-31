@@ -41,14 +41,14 @@ func (b *sinkBuilder) withDestination(ctx context.Context, cfg config.Sink) *sin
 	}
 
 	switch cfg.Type {
-	case "none":
+	case string(ports.NONE):
 		b.sink = noopSink{}
 
-	case "log":
+	case string(ports.LOG):
 		//nolint:contextcheck // background sink loop is intentionally detached from caller ctx
 		b.sink = sink.NewBuffered(sink.SlogWriter{}, bufferedCfg(cfg))
 
-	case "postgresql":
+	case string(ports.POSTGRES):
 		w, err := sink.NewPostgresWriter(ctx, cfg.DSN)
 		if err != nil {
 			b.err = err

@@ -46,8 +46,8 @@ type CostBreakdown struct {
 }
 
 type Counterfactual struct {
-	Target string
-	Cost   USD
+	Target string `json:"target"`
+	Cost   USD    `json:"cost"`
 }
 
 func (c CostBreakdown) Delta(target string) (USD, bool) {
