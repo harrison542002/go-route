@@ -35,8 +35,8 @@ func ref(name, upstreamModel string) domains.TargetRef {
 	}
 }
 
-func target(p ports.Provider, name, upstreamModel string) dispatch.Target {
-	return dispatch.Target{
+func target(p ports.Provider, name, upstreamModel string) ports.Target {
+	return ports.Target{
 		Provider: p,
 		Model:    upstreamModel,
 		Ref:      ref(name, upstreamModel),
@@ -45,7 +45,7 @@ func target(p ports.Provider, name, upstreamModel string) dispatch.Target {
 
 // ladderOf builds a Ladder from targets, deriving the refs from them so
 // the router and resolver agree without the test stating things twice.
-func ladderOf(targets ...dispatch.Target) domains.Ladder {
+func ladderOf(targets ...ports.Target) domains.Ladder {
 	refs := make([]domains.TargetRef, 0, len(targets))
 	for _, t := range targets {
 		refs = append(refs, t.Ref)
@@ -62,7 +62,7 @@ func ladderOf(targets ...dispatch.Target) domains.Ladder {
 // The resolver is mocked rather than real because tests supply mock
 // providers directly; a real routing.Resolver would need a provider map
 // keyed by name, which adds setup without adding coverage here.
-func routing(ctrl *gomock.Controller, targets []dispatch.Target, routeErr error) (
+func routing(ctrl *gomock.Controller, targets []ports.Target, routeErr error) (
 	*httpmocks.MockRouter, *httpmocks.MockResolver, *domains.RequestFacts,
 ) {
 	got := &domains.RequestFacts{}
@@ -216,7 +216,7 @@ func decodeError(t *testing.T, resp *http.Response) errorEnvelope {
 func TestCompletions_StreamingSuccess(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	p := scriptedProvider(ctrl, "openai", chunks("Hel", "lo"))
-	r, res, _ := routing(ctrl, []dispatch.Target{target(p, "openai", "upstream-m")}, nil)
+	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "upstream-m")}, nil)
 
 	h, _ := newHandler(r, res)
 	resp := post(t, h,
@@ -244,7 +244,7 @@ func TestCompletions_StreamingSuccess(t *testing.T) {
 func TestCompletions_PassesFactsToRouter(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	p := scriptedProvider(ctrl, "openai", chunks("x"))
-	r, res, got := routing(ctrl, []dispatch.Target{target(p, "openai", "m")}, nil)
+	r, res, got := routing(ctrl, []ports.Target{target(p, "openai", "m")}, nil)
 
 	h, _ := newHandler(r, res)
 	post(t, h,
@@ -289,7 +289,7 @@ func TestCompletions_DispatchesTargetModel(t *testing.T) {
 			return scriptedReader(ctrl, chunks("x"), io.EOF), nil
 		})
 
-	r, res, _ := routing(ctrl, []dispatch.Target{target(p, "openai", "gpt-5-mini")}, nil)
+	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5-mini")}, nil)
 
 	h, _ := newHandler(r, res)
 	post(t, h, `{"model":"fast","messages":[],"stream":true}`, nil)
@@ -312,7 +312,7 @@ func TestCompletions_NonStreaming(t *testing.T) {
 	p := scriptedProvider(ctrl, "openai", []ports.StreamEvent{
 		{Raw: []byte(body), Terminal: true},
 	})
-	r, res, _ := routing(ctrl, []dispatch.Target{target(p, "openai", "m")}, nil)
+	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "m")}, nil)
 
 	h, _ := newHandler(r, res)
 	resp := post(t, h, `{"model":"fast","messages":[]}`, nil)
@@ -335,7 +335,7 @@ func TestCompletions_FailoverIsInvisibleToTheClient(t *testing.T) {
 	})
 	alive := scriptedProvider(ctrl, "alive", chunks("ok"))
 
-	r, res, _ := routing(ctrl, []dispatch.Target{
+	r, res, _ := routing(ctrl, []ports.Target{
 		target(dead, "dead", "a"),
 		target(alive, "alive", "b"),
 	}, nil)
@@ -377,7 +377,7 @@ func TestCompletions_BadRequests(t *testing.T) {
 			// The provider must never be reached: rejection happens before
 			// dispatch.
 			p := unusedProvider(ctrl, "p")
-			r, res, _ := routing(ctrl, []dispatch.Target{target(p, "p", "m")}, tt.routerErr)
+			r, res, _ := routing(ctrl, []ports.Target{target(p, "p", "m")}, tt.routerErr)
 
 			h, _ := newHandler(r, res)
 			resp := post(t, h, tt.body, nil)
@@ -402,7 +402,7 @@ func TestCompletions_BodyTooLarge(t *testing.T) {
 	t.Cleanup(func() { maxBodyBytes = orig })
 
 	ctrl := gomock.NewController(t)
-	r, res, _ := routing(ctrl, []dispatch.Target{target(unusedProvider(ctrl, "p"), "p", "m")}, nil)
+	r, res, _ := routing(ctrl, []ports.Target{target(unusedProvider(ctrl, "p"), "p", "m")}, nil)
 
 	big := fmt.Sprintf(`{"model":"fast","messages":[{"role":"user","content":%q}]}`,
 		strings.Repeat("x", 4096))
@@ -482,7 +482,7 @@ func TestCompletions_ExhaustedLadder(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			p := failingProvider(ctrl, "p", tt.upstream)
-			r, res, _ := routing(ctrl, []dispatch.Target{target(p, "p", "m")}, nil)
+			r, res, _ := routing(ctrl, []ports.Target{target(p, "p", "m")}, nil)
 
 			h, _ := newHandler(r, res)
 			resp := post(t, h, `{"model":"fast","messages":[],"stream":true}`, nil)
@@ -512,7 +512,7 @@ func TestCompletions_NonRetryableStopsLadder(t *testing.T) {
 	})
 	never := unusedProvider(ctrl, "never")
 
-	r, res, _ := routing(ctrl, []dispatch.Target{
+	r, res, _ := routing(ctrl, []ports.Target{
 		target(bad, "bad", "a"),
 		target(never, "never", "b"),
 	}, nil)
@@ -540,7 +540,7 @@ func TestCompletions_TruncationAfterCommit(t *testing.T) {
 		})
 
 	backup := unusedProvider(ctrl, "backup")
-	r, res, _ := routing(ctrl, []dispatch.Target{
+	r, res, _ := routing(ctrl, []ports.Target{
 		target(p, "flaky", "a"),
 		target(backup, "backup", "b"),
 	}, nil)

@@ -8,7 +8,6 @@ import (
 
 	"github.com/harrison542002/go-route/internal/core/domains"
 	"github.com/harrison542002/go-route/internal/ports"
-	"github.com/harrison542002/go-route/internal/usecases/dispatch"
 )
 
 var maxBodyBytes int64 = 20 << 20 // multimodal requests carry megabytes of base64
@@ -27,18 +26,18 @@ type Router interface {
 // between the domain, which reasons about names, and dispatch, which
 // needs live provider clients.
 type Resolver interface {
-	Resolve(domains.Ladder) ([]dispatch.Target, error)
+	Resolve(domains.Ladder) ([]ports.Target, error)
 }
 
 type Handler struct {
 	router     Router
 	resolver   Resolver
-	dispatcher *dispatch.Dispatcher
+	dispatcher ports.Dispatcher
 	sink       ports.DecisionSink
 	now        func() time.Time
 }
 
-func NewHandler(r Router, res Resolver, d *dispatch.Dispatcher, sink ports.DecisionSink, now func() time.Time) *Handler {
+func NewHandler(r Router, res Resolver, d ports.Dispatcher, sink ports.DecisionSink, now func() time.Time) *Handler {
 	if now == nil {
 		now = time.Now
 	}

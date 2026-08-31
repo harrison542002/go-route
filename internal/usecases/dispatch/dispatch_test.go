@@ -122,7 +122,7 @@ func events(n int) []ports.StreamEvent {
 	return out
 }
 
-func run(t *testing.T, ladder []Target, req *ports.ProviderRequest, rec *recorder) domains.Outcome {
+func run(t *testing.T, ladder []ports.Target, req *ports.ProviderRequest, rec *recorder) domains.Outcome {
 	t.Helper()
 	if req == nil {
 		req = &ports.ProviderRequest{Model: "m", Stream: true}
@@ -139,7 +139,7 @@ func TestRun_FirstTargetSucceeds(t *testing.T) {
 	p := streamingProvider(ctrl, "openai", events(3), io.EOF)
 	rec := newRecorder()
 
-	out := run(t, []Target{{Provider: p, Model: "gpt-5-mini"}}, nil, rec)
+	out := run(t, []ports.Target{{Provider: p, Model: "gpt-5-mini"}}, nil, rec)
 
 	if out.Status != domains.StatusOK {
 		t.Errorf("status = %q, want ok", out.Status)
@@ -167,13 +167,13 @@ func TestRun_FailoverBeforeCommit(t *testing.T) {
 	alive := streamingProvider(ctrl, "alive", events(2), io.EOF)
 	rec := newRecorder()
 
-	out := run(t, []Target{{Provider: dead, Model: "a"}, {Provider: alive, Model: "b"}}, nil, rec)
+	out := run(t, []ports.Target{{Provider: dead, Model: "a"}, {Provider: alive, Model: "b"}}, nil, rec)
 
 	if out.Status != domains.StatusOK {
 		t.Errorf("status = %q, want ok", out.Status)
 	}
 	if len(out.Attempts) != 2 {
-		t.Fatalf("attempts = %d, want 2 — the failed target must be recorded", len(out.Attempts))
+		t.Fatalf("attempts = %d, want 2 — the failed ports.Target must be recorded", len(out.Attempts))
 	}
 	if out.Attempts[0].Failure == nil {
 		t.Error("first attempt should record a failure")
@@ -191,9 +191,9 @@ func TestRun_FailoverBeforeCommit(t *testing.T) {
 func TestRun_AllTargetsFail_NeverCommits(t *testing.T) {
 	ctrl := gomock.NewController(t)
 
-	var ladder []Target
+	var ladder []ports.Target
 	for _, name := range []string{"a", "b", "c"} {
-		ladder = append(ladder, Target{Provider: failingProvider(ctrl, name, errors.New("unreachable")), Model: name})
+		ladder = append(ladder, ports.Target{Provider: failingProvider(ctrl, name, errors.New("unreachable")), Model: name})
 	}
 	rec := newRecorder()
 
@@ -206,7 +206,7 @@ func TestRun_AllTargetsFail_NeverCommits(t *testing.T) {
 		t.Errorf("attempts = %d, want 3", len(out.Attempts))
 	}
 	if len(rec.ops) != 0 {
-		t.Fatalf("nothing may be written downstream when no target commits, got %v", rec.ops)
+		t.Fatalf("nothing may be written downstream when no ports.Target commits, got %v", rec.ops)
 	}
 	if out.TTFTMs != 0 {
 		t.Errorf("TTFT = %d, want 0 — no first token was ever received", out.TTFTMs)
@@ -220,7 +220,7 @@ func TestRun_FailureAfterCommit_DoesNotFailOver(t *testing.T) {
 	backup := unusedProvider(ctrl, "backup") // Times(0) enforces this
 	rec := newRecorder()
 
-	out := run(t, []Target{{Provider: flaky, Model: "a"}, {Provider: backup, Model: "b"}}, nil, rec)
+	out := run(t, []ports.Target{{Provider: flaky, Model: "a"}, {Provider: backup, Model: "b"}}, nil, rec)
 
 	if out.Status != domains.StatusTruncated {
 		t.Errorf("status = %q, want truncated", out.Status)
@@ -240,7 +240,7 @@ func TestRun_NonRetryableStopsLadder(t *testing.T) {
 	})
 	other := unusedProvider(ctrl, "other")
 
-	out := run(t, []Target{{Provider: bad, Model: "a"}, {Provider: other, Model: "b"}}, nil, newRecorder())
+	out := run(t, []ports.Target{{Provider: bad, Model: "a"}, {Provider: other, Model: "b"}}, nil, newRecorder())
 
 	if len(out.Attempts) != 1 {
 		t.Errorf("attempts = %d, want 1 — an auth failure must not walk the ladder", len(out.Attempts))
@@ -260,7 +260,7 @@ func TestRun_UsageOverwritesNotAccumulates(t *testing.T) {
 		{Raw: []byte("c"), Usage: &domains.TokenUsage{Input: 100, Output: 120}, Terminal: true},
 	}, io.EOF)
 
-	out := run(t, []Target{{Provider: p, Model: "m"}}, nil, newRecorder())
+	out := run(t, []ports.Target{{Provider: p, Model: "m"}}, nil, newRecorder())
 
 	if out.Usage.Input != 100 {
 		t.Errorf("input = %d, want 100 (overwritten, not summed to 300)", out.Usage.Input)
@@ -282,7 +282,7 @@ func TestRun_UsageOnlyChunk(t *testing.T) {
 		p := streamingProvider(ctrl, "openai", script, io.EOF)
 		rec := newRecorder()
 
-		out := run(t, []Target{{Provider: p, Model: "m"}},
+		out := run(t, []ports.Target{{Provider: p, Model: "m"}},
 			&ports.ProviderRequest{Model: "m", Stream: true, WantsUsage: false}, rec)
 
 		if len(rec.sent) != 2 {
@@ -298,7 +298,7 @@ func TestRun_UsageOnlyChunk(t *testing.T) {
 		p := streamingProvider(ctrl, "openai", script, io.EOF)
 		rec := newRecorder()
 
-		run(t, []Target{{Provider: p, Model: "m"}},
+		run(t, []ports.Target{{Provider: p, Model: "m"}},
 			&ports.ProviderRequest{Model: "m", Stream: true, WantsUsage: true}, rec)
 
 		if len(rec.sent) != 3 {
@@ -313,7 +313,7 @@ func TestRun_ClientDisconnectDuringRelay(t *testing.T) {
 	rec := newRecorder()
 	rec.sendErrAt = 2
 
-	out := run(t, []Target{{Provider: p, Model: "m"}}, nil, rec)
+	out := run(t, []ports.Target{{Provider: p, Model: "m"}}, nil, rec)
 
 	if out.Status != domains.StatusClientDisconnect {
 		t.Errorf("status = %q, want client_disconnect", out.Status)
@@ -329,7 +329,7 @@ func TestRun_CommitFails(t *testing.T) {
 	rec := newRecorder()
 	rec.commitErr = errors.New("broken pipe")
 
-	out := run(t, []Target{{Provider: p, Model: "m"}}, nil, rec)
+	out := run(t, []ports.Target{{Provider: p, Model: "m"}}, nil, rec)
 
 	if out.Status != domains.StatusClientDisconnect {
 		t.Errorf("status = %q, want client_disconnect", out.Status)
@@ -357,7 +357,7 @@ func TestRun_ContextCancelled(t *testing.T) {
 	p.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(nil, context.Canceled)
 
 	rec := newRecorder()
-	out := New(clock()).Run(context.Background(), []Target{{Provider: p, Model: "m"}},
+	out := New(clock()).Run(context.Background(), []ports.Target{{Provider: p, Model: "m"}},
 		&ports.ProviderRequest{Model: "m"}, rec)
 
 	if len(rec.ops) != 0 {
@@ -369,7 +369,7 @@ func TestRun_ContextCancelled(t *testing.T) {
 }
 
 // The reader must be closed even when the attempt fails before commit,
-// or a failing ladder leaks one upstream connection per target.
+// or a failing ladder leaks one upstream connection per ports.Target.
 func TestRun_ReaderClosedOnPreCommitFailure(t *testing.T) {
 	ctrl := gomock.NewController(t)
 
@@ -381,5 +381,5 @@ func TestRun_ReaderClosedOnPreCommitFailure(t *testing.T) {
 	p.EXPECT().Name().Return("leaky").AnyTimes()
 	p.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(rdr, nil)
 
-	run(t, []Target{{Provider: p, Model: "m"}}, nil, newRecorder())
+	run(t, []ports.Target{{Provider: p, Model: "m"}}, nil, newRecorder())
 }

@@ -45,6 +45,7 @@ func (b *sinkBuilder) withDestination(ctx context.Context, cfg config.Sink) *sin
 		b.sink = noopSink{}
 
 	case "log":
+		//nolint:contextcheck // background sink loop is intentionally detached from caller ctx
 		b.sink = sink.NewBuffered(sink.SlogWriter{}, bufferedCfg(cfg))
 
 	case "postgresql":
@@ -54,6 +55,8 @@ func (b *sinkBuilder) withDestination(ctx context.Context, cfg config.Sink) *sin
 			return b
 		}
 		b.closers = append(b.closers, w.Close)
+
+		//nolint:contextcheck // background sink loop is intentionally detached from caller ctx
 		b.sink = sink.NewBuffered(w, bufferedCfg(cfg))
 
 	default:

@@ -13,7 +13,7 @@ import (
 	reflect "reflect"
 
 	domains "github.com/harrison542002/go-route/internal/core/domains"
-	dispatch "github.com/harrison542002/go-route/internal/usecases/dispatch"
+	ports "github.com/harrison542002/go-route/internal/ports"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -81,10 +81,10 @@ func (m *MockResolver) EXPECT() *MockResolverMockRecorder {
 }
 
 // Resolve mocks base method.
-func (m *MockResolver) Resolve(arg0 domains.Ladder) ([]dispatch.Target, error) {
+func (m *MockResolver) Resolve(arg0 domains.Ladder) ([]ports.Target, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Resolve", arg0)
-	ret0, _ := ret[0].([]dispatch.Target)
+	ret0, _ := ret[0].([]ports.Target)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }

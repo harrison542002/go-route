@@ -42,3 +42,9 @@ linters:
           deny:
             - pkg: "github.com/harrison542002/go-route/internal/bootstrap"
               desc: "nothing may import the composition root"
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - depguard

@@ -11,19 +11,6 @@ import (
 	"github.com/harrison542002/go-route/internal/ports"
 )
 
-type Target struct {
-	Provider ports.Provider
-	Model    string
-	Ref      domains.TargetRef
-}
-
-func (t Target) String() string {
-	if t.Ref.Name == "" {
-		return "unnamed:" + t.Model
-	}
-	return t.Ref.Name
-}
-
 type Dispatcher struct {
 	now func() time.Time
 }
@@ -37,7 +24,7 @@ func New(now func() time.Time) *Dispatcher {
 
 func (d *Dispatcher) Run(
 	ctx context.Context,
-	ladder []Target,
+	ladder []ports.Target,
 	req *ports.ProviderRequest,
 	out ports.ClientStream,
 ) domains.Outcome {
@@ -72,7 +59,7 @@ func (d *Dispatcher) Run(
 // went away — in which case outcome is final.
 func (d *Dispatcher) tryTarget(
 	ctx context.Context,
-	target Target,
+	target ports.Target,
 	req *ports.ProviderRequest,
 	out ports.ClientStream,
 	outcome *domains.Outcome,
@@ -171,7 +158,7 @@ func retryable(err error) bool {
 	return true
 }
 
-func (d *Dispatcher) failedAttempt(t Target, startedAt time.Time, err error) domains.Attempt {
+func (d *Dispatcher) failedAttempt(t ports.Target, startedAt time.Time, err error) domains.Attempt {
 	failure := domains.AttemptFailure{
 		Kind:      ports.FailureUnknown.String(),
 		Message:   err.Error(),
