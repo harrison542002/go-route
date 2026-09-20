@@ -26,11 +26,9 @@ var _ = Describe("Store", func() {
 		c, cancel := ctx()
 		defer cancel()
 
-		var err error
-		writer, err = sink.NewPostgresWriter(c, dsn)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(writer.Close)
+		writer = sink.NewPostgresWriter(pool)
 
+		var err error
 		store, err = postgresql.NewStore(c, dsn)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(store.Close)

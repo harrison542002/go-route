@@ -45,7 +45,7 @@ func runServe() error {
 		return err
 	}
 
-	server := httpapi.NewServer(cfg.Listen, application.Handler)
+	server := httpapi.NewServer(cfg.Listen, application.Handler, application.Auth)
 
 	serverCtx, abortInFlight := context.WithCancel(context.Background())
 	defer abortInFlight()

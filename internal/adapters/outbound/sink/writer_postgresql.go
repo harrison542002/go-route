@@ -2,119 +2,182 @@ package sink
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/harrison542002/go-route/db/gen"
 	"github.com/harrison542002/go-route/internal/adapters/outbound/store/postgresql"
 	"github.com/harrison542002/go-route/internal/core/domains"
 )
 
+const (
+	gatewayActor = "gateway"
+	routeAction  = "route_request"
+)
+
+const billableByDefault = true
+
 type PostgresWriter struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	q       *gen.Queries
+	tenants *postgresql.TenantIDs
 }
 
 var _ Writer = (*PostgresWriter)(nil)
-var columns = []string{
-	"id", "occurred_at", "tenant",
-	"requested_model", "chosen_target", "status", "reason_kind", "reason_detail", "policy_version",
-	"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
-	"cost_nanos", "price_table_version",
-	"ttft_ms", "total_ms", "attempt_count",
-	"metadata", "attempts", "counterfactuals", "ladder",
+
+func NewPostgresWriter(pool *pgxpool.Pool) *PostgresWriter {
+	q := gen.New(pool)
+	return &PostgresWriter{pool: pool, q: q, tenants: postgresql.NewTenantIDs(q)}
 }
 
-func NewPostgresWriter(ctx context.Context, dsn string) (*PostgresWriter, error) {
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: connect: %w", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("postgres: ping: %w", err)
-	}
-	if _, err := pool.Exec(ctx, postgresql.Schema); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("postgres: schema: %w", err)
-	}
-	return &PostgresWriter{pool: pool}, nil
-}
-
-func (w *PostgresWriter) Close() error {
-	w.pool.Close()
-	return nil
-}
-
+// Write persists a batch as one transaction. Two COPYs without one
+// would let a crash leave spend recorded with no explanation of where it
+// went.
 func (w *PostgresWriter) Write(ctx context.Context, batch []domains.RoutingDecision) error {
-	rows := make([][]any, 0, len(batch))
-	for _, d := range batch {
-		row, err := flatten(d)
-		if err != nil {
-			return fmt.Errorf("postgres: encode %s: %w", d.ID, err)
-		}
-		rows = append(rows, row)
+	if len(batch) == 0 {
+		return nil
 	}
 
-	_, err := w.pool.CopyFrom(ctx, pgx.Identifier{"decisions"}, columns, pgx.CopyFromRows(rows))
+	ledger := make([]gen.InsertUsageLedgerParams, 0, len(batch))
+	audit := make([]gen.InsertAuditLogParams, 0, len(batch))
+
+	for _, d := range batch {
+		// An unknown tenant here means one got past ingress, which is a
+		// bug rather than a condition to paper over: the ledger must not
+		// invent the customer a charge is attributed to.
+		tenantID, err := w.tenants.Lookup(ctx, d.Tenant)
+		if err != nil {
+			return err
+		}
+
+		l, err := ledgerRow(d, tenantID)
+		if err != nil {
+			return fmt.Errorf("postgres: encode ledger %s: %w", d.ID, err)
+		}
+		a, err := auditRow(d, tenantID)
+		if err != nil {
+			return fmt.Errorf("postgres: encode audit %s: %w", d.ID, err)
+		}
+
+		ledger = append(ledger, l)
+		audit = append(audit, a)
+	}
+
+	tx, err := w.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("postgres: copy %d rows: %w", len(rows), err)
+		return fmt.Errorf("postgres: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	q := w.q.WithTx(tx)
+
+	if _, err := q.InsertUsageLedger(ctx, ledger); err != nil {
+		return fmt.Errorf("postgres: copy %d ledger rows: %w", len(ledger), err)
+	}
+	if _, err := q.InsertAuditLog(ctx, audit); err != nil {
+		return fmt.Errorf("postgres: copy %d audit rows: %w", len(audit), err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit %d rows: %w", len(batch), err)
 	}
 	return nil
 }
 
-func flatten(d domains.RoutingDecision) ([]any, error) {
+func ledgerRow(d domains.RoutingDecision, tenantID uuid.UUID) (gen.InsertUsageLedgerParams, error) {
 	metadata, err := json.Marshal(d.Request.Metadata)
 	if err != nil {
-		return nil, err
-	}
-	attempts, err := json.Marshal(d.Outcome.Attempts)
-	if err != nil {
-		return nil, err
-	}
-	ladder, err := json.Marshal(d.Ladder.Targets)
-	if err != nil {
-		return nil, err
+		return gen.InsertUsageLedgerParams{}, err
 	}
 
 	var (
-		costNanos   *int64
-		priceTable  *string
-		counterJSON = []byte("[]")
+		costNanos       *int64
+		pricingVersion  *string
+		counterfactuals = []byte("[]")
 	)
 	if d.Cost != nil {
 		n := int64(d.Cost.Actual)
 		costNanos = &n
-		priceTable = &d.Cost.PriceTableVersion
+		pricingVersion = &d.Cost.PriceTableVersion
 		if len(d.Cost.Counterfactuals) > 0 {
-			if counterJSON, err = json.Marshal(d.Cost.Counterfactuals); err != nil {
-				return nil, err
+			if counterfactuals, err = json.Marshal(d.Cost.Counterfactuals); err != nil {
+				return gen.InsertUsageLedgerParams{}, err
 			}
 		}
 	}
 
-	var chosen *string
-	if t := d.Outcome.ChosenTarget(); t != "" {
-		chosen = &t
-	}
-
-	var policyVersion *int
-	if d.Ladder.Reason.PolicyVersion > 0 {
-		policyVersion = &d.Ladder.Reason.PolicyVersion
-	}
-
-	return []any{
-		d.ID.UUID(), d.OccurredAt, string(d.Tenant),
-		d.Request.RequestedModel, chosen, string(d.Outcome.Status),
-		string(d.Ladder.Reason.Kind), reasonDetail(d.Ladder.Reason), policyVersion,
-		d.Outcome.Usage.Input, d.Outcome.Usage.Output,
-		d.Outcome.Usage.CacheRead, d.Outcome.Usage.CacheWrite, d.Outcome.Usage.Reasoning,
-		costNanos, priceTable,
-		d.Outcome.TTFTMs, d.Outcome.TotalMs, len(d.Outcome.Attempts),
-		metadata, attempts, counterJSON, ladder,
+	return gen.InsertUsageLedgerParams{
+		ID:               d.ID.UUID(),
+		StartedAt:        d.OccurredAt,
+		TenantID:         tenantID,
+		KeyID:            optionalUUID(d.KeyID),
+		RequestedModel:   d.Request.RequestedModel,
+		ChosenTarget:     optional(d.Outcome.ChosenTarget()),
+		Status:           string(d.Outcome.Status),
+		InputTokens:      int32(d.Outcome.Usage.Input),
+		OutputTokens:     int32(d.Outcome.Usage.Output),
+		CacheReadTokens:  int32(d.Outcome.Usage.CacheRead),
+		CacheWriteTokens: int32(d.Outcome.Usage.CacheWrite),
+		ReasoningTokens:  int32(d.Outcome.Usage.Reasoning),
+		CostNanos:        costNanos,
+		TokenSource:      "provider",
+		PricingVersion:   pricingVersion,
+		Billable:         billableByDefault,
+		TtftMs:           optionalInt(d.Outcome.TTFTMs),
+		TotalMs:          optionalInt(d.Outcome.TotalMs),
+		Metadata:         metadata,
+		Counterfactuals:  counterfactuals,
 	}, nil
+}
+
+func auditRow(d domains.RoutingDecision, tenantID uuid.UUID) (gen.InsertAuditLogParams, error) {
+	ladder, err := json.Marshal(d.Ladder.Targets)
+	if err != nil {
+		return gen.InsertAuditLogParams{}, err
+	}
+	attempts, err := json.Marshal(d.Outcome.Attempts)
+	if err != nil {
+		return gen.InsertAuditLogParams{}, err
+	}
+
+	var policyVersion *int32
+	if d.Ladder.Reason.PolicyVersion > 0 {
+		v := int32(d.Ladder.Reason.PolicyVersion)
+		policyVersion = &v
+	}
+
+	return gen.InsertAuditLogParams{
+		ID:             d.ID.UUID(),
+		Ts:             d.OccurredAt,
+		TenantID:       &tenantID,
+		KeyID:          optionalUUID(d.KeyID),
+		Actor:          gatewayActor,
+		Action:         routeAction,
+		RequestID:      optional(d.ID.String()),
+		ReasonKind:     optional(string(d.Ladder.Reason.Kind)),
+		ReasonDetail:   optional(reasonDetail(d.Ladder.Reason)),
+		PolicyVersion:  policyVersion,
+		Ladder:         ladder,
+		LadderAttempts: attempts,
+		FinalTarget:    optional(d.Outcome.ChosenTarget()),
+		Error:          optional(lastFailure(d.Outcome)),
+	}, nil
+}
+
+// lastFailure is what an operator reads first, so it gets a column
+// rather than living only inside ladder_attempts.
+func lastFailure(o domains.Outcome) string {
+	if len(o.Attempts) == 0 {
+		return ""
+	}
+	last := o.Attempts[len(o.Attempts)-1]
+	if last.Failure == nil {
+		return ""
+	}
+	return last.Failure.Message
 }
 
 func reasonDetail(r domains.Reason) string {
@@ -126,4 +189,30 @@ func reasonDetail(r domains.Reason) string {
 	default:
 		return ""
 	}
+}
+
+// optional maps the empty string to NULL, so no query has to ask about
+// both.
+func optional(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// optionalUUID maps the zero UUID to NULL: a record written with no
+// credential behind it must not claim one.
+func optionalUUID(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
+}
+
+func optionalInt(n int) *int32 {
+	if n == 0 {
+		return nil
+	}
+	v := int32(n)
+	return &v
 }

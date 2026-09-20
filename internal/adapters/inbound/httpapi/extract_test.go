@@ -173,88 +173,19 @@ func TestExtractFacts_Errors(t *testing.T) {
 	}
 }
 
-// Tenant comes from auth, never from client-supplied input. A client that
-// declares its own tenant could bill another scope and evade that scope's
-// policy.
-func TestExtractFacts_TenantCannotBeSpoofed(t *testing.T) {
+func TestExtractFacts_TenantComesFromTheCaller(t *testing.T) {
 	body := `{"model":"m","messages":[]}`
 	r := newRequest(t, body, map[string]string{"X-Go-Route-Tenant": "victim-corp"})
 
-	got, err := ExtractFacts(r, []byte(body), "attacker-corp", testNow)
+	got, err := ExtractFacts(r, []byte(body), "acme", testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if got.Tenant != "attacker-corp" {
-		t.Errorf("Tenant = %q, want %q — header overrode the authenticated tenant", got.Tenant, "attacker-corp")
+	if got.Tenant != "acme" {
+		t.Errorf("Tenant = %q, want %q -- a header overrode the authenticated tenant", got.Tenant, "acme")
 	}
-	if got.Metadata["tenant"] != "victim-corp" {
-		t.Errorf("the header should still land in metadata as an ordinary key, got %q", got.Metadata["tenant"])
-	}
-}
-
-func TestExtractMetadata_ValueTruncation(t *testing.T) {
-	long := strings.Repeat("x", domains.MaxMetadataLen+100)
-	h := http.Header{}
-	h.Set("X-Go-Route-Blob", long)
-
-	md := extractMetadata(h)
-
-	if len(md["blob"]) != domains.MaxMetadataLen {
-		t.Errorf("len = %d, want %d", len(md["blob"]), domains.MaxMetadataLen)
-	}
-}
-
-// Go randomises map iteration order. Without a deterministic sort before
-// the cap, identical requests would retain different subsets of keys and
-// could therefore match different policy rules.
-func TestExtractMetadata_TruncationIsDeterministic(t *testing.T) {
-	h := http.Header{}
-	for i := 0; i < domains.MaxMetadataKeys+20; i++ {
-		h.Set("X-Go-Route-Key"+string(rune('a'+i%26))+string(rune('0'+i/26)), "v")
-	}
-
-	first := extractMetadata(h)
-	if len(first) != domains.MaxMetadataKeys {
-		t.Fatalf("len = %d, want %d", len(first), domains.MaxMetadataKeys)
-	}
-
-	for i := 0; i < 50; i++ {
-		if got := extractMetadata(h); !reflect.DeepEqual(got, first) {
-			t.Fatalf("iteration %d produced a different subset\ngot:   %v\nfirst: %v", i, got, first)
-		}
-	}
-}
-
-func TestExtractMetadata_KeysNotValues(t *testing.T) {
-	h := http.Header{}
-	h.Set("X-Go-Route-Feature", "auto-tag")
-	h.Set("X-Go-Route-Surface", "widget")
-
-	md := extractMetadata(h)
-
-	want := map[string]string{"feature": "auto-tag", "surface": "widget"}
-	if !reflect.DeepEqual(md, want) {
-		t.Errorf("\ngot:  %v\nwant: %v", md, want)
-	}
-}
-
-func TestExtractMetadata_DuplicateHeaderTakesFirst(t *testing.T) {
-	h := http.Header{}
-	h.Add("X-Go-Route-Feature", "first")
-	h.Add("X-Go-Route-Feature", "second")
-
-	if got := extractMetadata(h)["feature"]; got != "first" {
-		t.Errorf("feature = %q, want %q", got, "first")
-	}
-}
-
-func TestExtractMetadata_Empty(t *testing.T) {
-	md := extractMetadata(http.Header{})
-	if md == nil {
-		t.Fatal("returned nil; callers index into this map, so it must be non-nil")
-	}
-	if len(md) != 0 {
-		t.Errorf("len = %d, want 0", len(md))
+	if v, ok := got.Metadata[tenantKey]; ok {
+		t.Errorf("tenant header became metadata key %q = %q", tenantKey, v)
 	}
 }

@@ -65,7 +65,7 @@ jobs:
           version: v2.13.2
 
   test:
-    name: Unit and E2E
+    name: Unit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,7 +89,7 @@ jobs:
           path: coverage.out
 
   integration:
-    name: Integration
+    name: Integration and E2E
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -98,6 +98,11 @@ jobs:
           go-version-file: go.mod
           cache: true
       
+      - uses: ariga/setup-atlas@v0
+
+      - name: Verify migrations match atlas.sum
+        run: atlas migrate validate --dir "file://db/migrations"
+
       - name: Pre-pull Postgres
         run: docker pull postgres:17-alpine
 

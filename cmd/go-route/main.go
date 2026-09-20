@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/harrison542002/go-route/internal/config"
-	"github.com/harrison542002/go-route/internal/ports"
 )
 
 var (
@@ -46,10 +45,9 @@ func storeDSN(cfg *config.Config) (string, error) {
 	if dsnFlag != "" {
 		return dsnFlag, nil
 	}
-	if cfg.Sink.Type != string(ports.POSTGRES) || cfg.Sink.DSN == "" {
+	if cfg.Sink.DSN == "" {
 		return "", fmt.Errorf(
-			"no decision store configured: set sink.type to postgres in %s, or pass --dsn",
-			cfgPath)
+			"no decision store configured: set sink.dsn in %s, or pass --dsn", cfgPath)
 	}
 	return cfg.Sink.DSN, nil
 }

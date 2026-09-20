@@ -9,7 +9,10 @@ import (
 	"github.com/harrison542002/go-route/internal/core/domains"
 )
 
-var ErrDecisionNotFound = errors.New("store: decision not found")
+var (
+	ErrDecisionNotFound = errors.New("store: decision not found")
+	ErrUnknownTenant    = errors.New("store: unknown tenant")
+)
 
 // DecisionStore reads the decision log.
 type DecisionStore interface {

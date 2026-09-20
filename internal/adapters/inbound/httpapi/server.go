@@ -3,11 +3,15 @@ package httpapi
 import (
 	"net/http"
 	"time"
+
+	"github.com/harrison542002/go-route/internal/ports"
 )
 
-func NewServer(addr string, h *Handler) *http.Server {
+func NewServer(addr string, h *Handler, auth ports.Authenticator) *http.Server {
+	authenticated := Authenticate(auth)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", h.Completions)
+	mux.Handle("POST /v1/chat/completions", authenticated(http.HandlerFunc(h.Completions)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

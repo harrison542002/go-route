@@ -21,20 +21,13 @@ var _ = Describe("Buffered sink over Postgres", func() {
 	)
 
 	newSink := func(cfg sink.Config) {
-		c, cancel := ctx()
-		defer cancel()
-
-		var err error
-		writer, err = sink.NewPostgresWriter(c, dsn)
-		Expect(err).NotTo(HaveOccurred())
-
+		writer = sink.NewPostgresWriter(pool)
 		s = sink.NewBuffered(writer, cfg)
 
 		DeferCleanup(func() {
 			fc, fcancel := ctx()
 			defer fcancel()
 			_ = s.Flush(fc)
-			_ = writer.Close()
 		})
 	}
 
@@ -48,7 +41,7 @@ var _ = Describe("Buffered sink over Postgres", func() {
 		}
 
 		Eventually(func() int {
-			return countRows("SELECT count(*) FROM decisions")
+			return countRows("SELECT count(*) FROM usage_ledger")
 		}, "5s", "50ms").Should(Equal(5))
 	})
 
@@ -59,7 +52,7 @@ var _ = Describe("Buffered sink over Postgres", func() {
 		s.Record(newDecision())
 
 		Eventually(func() int {
-			return countRows("SELECT count(*) FROM decisions")
+			return countRows("SELECT count(*) FROM usage_ledger")
 		}, "5s", "50ms").Should(Equal(2),
 			"a low-traffic deployment must not sit on records indefinitely")
 	})
@@ -75,7 +68,7 @@ var _ = Describe("Buffered sink over Postgres", func() {
 		defer cancel()
 		Expect(s.Flush(c)).To(Succeed())
 
-		Expect(countRows("SELECT count(*) FROM decisions")).To(Equal(250),
+		Expect(countRows("SELECT count(*) FROM usage_ledger")).To(Equal(250),
 			"closing the channel must drain the buffer, not discard it")
 	})
 
@@ -114,14 +107,14 @@ var _ = Describe("Buffered sink over Postgres", func() {
 		s.Record(d)
 
 		Eventually(func() int {
-			return countRows("SELECT count(*) FROM decisions WHERE id = $1", d.ID.UUID())
+			return countRows("SELECT count(*) FROM usage_ledger WHERE id = $1", d.ID.UUID())
 		}, "5s", "50ms").Should(Equal(1))
 
 		c, cancel := ctx()
 		defer cancel()
 
 		var costNanos *int64
-		Expect(pool.QueryRow(c, "SELECT cost_nanos FROM decisions WHERE id = $1", d.ID.UUID()).
+		Expect(pool.QueryRow(c, "SELECT cost_nanos FROM usage_ledger WHERE id = $1", d.ID.UUID()).
 			Scan(&costNanos)).To(Succeed())
 		Expect(costNanos).NotTo(BeNil())
 		Expect(*costNanos).To(Equal(int64(120_500)))

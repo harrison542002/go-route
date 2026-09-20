@@ -242,15 +242,14 @@ Every routed request produces a decision record: which targets were
 eligible, which one served it, why that one, what it cost, and how long
 it took. The sink is where those records land.
 
-| Type       | Where records go                | Survives restart | Use for                                    |
-|------------|---------------------------------|------------------|--------------------------------------------|
-| `log`      | stdout as structured JSON       | no               | the default; trying go-route out           |
-| `postgres` | a `decisions` table             | yes              | anything you intend to report on           |
-| `none`     | discarded                       | no               | running the proxy with no audit trail      |
+Postgres is required, and there is no other option. go-route cannot
+authenticate a request without `api_keys`, so a deployment without a
+database cannot serve traffic at all — which made a choice of sink a
+choice between recording a request and serving one it could not
+attribute.
 
 ```yaml
 sink:
-  type: postgres
   dsn: ${DATABASE_URL}
 
   # Records are buffered and written in batches so persistence never
@@ -262,14 +261,49 @@ sink:
   flush_interval: 1s     # write a partial batch after this long
 ```
 
-`postgres` creates its schema on first connect, so no migration step is
-needed to get started. Drops are logged and counted; if you see them, the
-database is not keeping up and `buffer_size` or `batch_size` needs
-raising.
+`postgres` expects an already-migrated database. Schema is owned by
+[Atlas](https://atlasgo.io):
 
-With `type: none` the proxy still routes and fails over normally. You
-simply lose the ability to explain, report on, or attribute any of it
-afterwards.
+```bash
+export DATABASE_URL=postgres://...
+atlas migrate apply --env local    # or: make migrate
+```
+
+Clients authenticate with an API key in the standard place, so pointing
+an existing OpenAI SDK at go-route needs a base URL change and nothing
+else:
+
+```
+Authorization: Bearer gr_live_...
+```
+
+The key decides the tenant. It is SHA-256'd and looked up in `api_keys`,
+which yields the tenant, the key id recorded against the spend, and the
+model allowlist that key may request. A client never names the tenant it
+wants billed. Unknown and revoked keys are both 401 with the same body;
+a disabled tenant or a model outside the key's allowlist is 403; a
+database that cannot be reached is 503, never a rejection.
+
+With the `log` and `none` sinks there is no `api_keys` table to check
+against, so every request is admitted as the default tenant. That is the
+"trying go-route out" mode and it authenticates nothing.
+
+Each record is split in two: the money goes to `usage_ledger` and the
+routing story to `audit_log`, both keyed by the same decision ID and
+written in one transaction. Drops are logged and counted; if you see
+them, the database is not keeping up and `buffer_size` or `batch_size`
+needs raising.
+
+Monthly partitions for those two tables are created by the gateway, not
+by a migration: which months a deployment needs depends on how long it
+has been running, not on its schema version.
+
+See [db/migrations/](db/migrations/) for the schema, [db/queries/](db/queries/)
+for the queries sqlc compiles, and [db/gen/](db/gen/) for what it generates.
+
+The gateway tops up those monthly partitions on a daily timer, not only
+at startup: coverage pinned to the last restart would run out on a
+long-lived process, and every write after that would fail.
 
 ## Tests
 

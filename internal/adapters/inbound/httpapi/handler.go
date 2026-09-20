@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -37,7 +38,13 @@ type Handler struct {
 	now        func() time.Time
 }
 
-func NewHandler(r Router, res Resolver, d ports.Dispatcher, sink ports.DecisionSink, now func() time.Time) *Handler {
+func NewHandler(
+	r Router,
+	res Resolver,
+	d ports.Dispatcher,
+	sink ports.DecisionSink,
+	now func() time.Time,
+) *Handler {
 	if now == nil {
 		now = time.Now
 	}
@@ -48,15 +55,27 @@ func (h *Handler) Completions(w http.ResponseWriter, r *http.Request) {
 	now := h.now()
 	decisionID := domains.NewDecisionID()
 
+	identity, ok := IdentityFrom(r.Context())
+	if !ok {
+		writeAuthError(w, ports.ErrNoCredentials)
+		return
+	}
+
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	if err != nil {
 		writeError(w, http.StatusRequestEntityTooLarge, "request body too large", "invalid_request_error")
 		return
 	}
 
-	facts, err := ExtractFacts(r, raw, domains.DefaultTenant, now)
+	facts, err := ExtractFacts(r, raw, identity.Tenant, now)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
+	facts.KeyID = identity.KeyID
+
+	if !identity.AllowsModel(facts.RequestedModel) {
+		writeAuthError(w, fmt.Errorf("%w: %s", ports.ErrModelNotAllowed, facts.RequestedModel))
 		return
 	}
 

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/mock/gomock"
 
 	httpmocks "github.com/harrison542002/go-route/internal/adapters/inbound/httpapi/mocks"
@@ -142,9 +143,40 @@ var testNowFn = func() time.Time {
 	return time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 }
 
-func newHandler(r Router, res Resolver) (*Handler, *recordingSink) {
+func newHandler(r Router, res Resolver) (http.Handler, *recordingSink) {
 	s := &recordingSink{}
-	return NewHandler(r, res, dispatch.New(testNowFn), s, testNowFn), s
+	return mounted(NewHandler(r, res, dispatch.New(testNowFn), s, testNowFn),
+		stubAuth{tenant: "acme"}), s
+}
+
+// authedHandler is newHandler with a chosen authenticator.
+func authedHandler(t *testing.T, r Router, res Resolver, auth ports.Authenticator) http.Handler {
+	t.Helper()
+	return mounted(NewHandler(r, res, dispatch.New(testNowFn), &recordingSink{}, testNowFn), auth)
+}
+
+// mounted wraps the handler the way NewServer does, so a spec that posts
+// a request goes through authentication rather than around it.
+func mounted(h *Handler, auth ports.Authenticator) http.Handler {
+	return Authenticate(auth)(http.HandlerFunc(h.Completions))
+}
+
+// stubAuth stands in for the api_keys lookup.
+type stubAuth struct {
+	tenant    domains.Tenant
+	keyID     uuid.UUID
+	allowlist []string
+	err       error
+}
+
+func (a stubAuth) Authenticate(_ context.Context, presented string) (ports.Identity, error) {
+	if a.err != nil {
+		return ports.Identity{}, a.err
+	}
+	if presented == "" {
+		return ports.Identity{}, ports.ErrNoCredentials
+	}
+	return ports.Identity{Tenant: a.tenant, KeyID: a.keyID, Allowlist: a.allowlist}, nil
 }
 
 type recordingSink struct {
@@ -170,10 +202,10 @@ func (s *recordingSink) Records() []domains.RoutingDecision {
 
 // --- request helpers -------------------------------------------------
 
-func post(t *testing.T, h *Handler, body string, headers map[string]string) *http.Response {
+func post(t *testing.T, h http.Handler, body string, headers map[string]string) *http.Response {
 	t.Helper()
 
-	srv := httptest.NewServer(http.HandlerFunc(h.Completions))
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
 	req, err := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(body))
@@ -181,6 +213,7 @@ func post(t *testing.T, h *Handler, body string, headers map[string]string) *htt
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer gr_test_key")
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -267,8 +300,8 @@ func TestCompletions_PassesFactsToRouter(t *testing.T) {
 	if _, leaked := got.Metadata["authorization"]; leaked {
 		t.Error("Authorization leaked into metadata, which lands in the audit log")
 	}
-	if got.Tenant != domains.DefaultTenant {
-		t.Errorf("Tenant = %q", got.Tenant)
+	if got.Tenant != "acme" {
+		t.Errorf("Tenant = %q, want the one the header named", got.Tenant)
 	}
 	if !got.ReceivedAt.Equal(testNowFn()) {
 		t.Errorf("ReceivedAt = %v, want the injected clock value", got.ReceivedAt)
@@ -558,5 +591,226 @@ func TestCompletions_TruncationAfterCommit(t *testing.T) {
 	}
 	if strings.Contains(body, "[DONE]") {
 		t.Error("a truncated stream must not be terminated with [DONE]")
+	}
+}
+
+// --- authentication ---------------------------------------------------
+
+// A request with no credential has no tenant to bill, so it is rejected
+// before the body is read.
+func TestCompletions_RequiresAnAPIKey(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	p := unusedProvider(ctrl, "openai")
+	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5")}, nil)
+
+	h, _ := newHandler(r, res)
+
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL,
+		strings.NewReader(`{"model":"fast","messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body %s)", resp.StatusCode, readBody(t, resp))
+	}
+	if got := resp.Header.Get("WWW-Authenticate"); got != "Bearer" {
+		t.Errorf("WWW-Authenticate = %q, want Bearer", got)
+	}
+}
+
+func TestCompletions_RejectsBadCredentials(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "unknown key", err: ports.ErrUnknownKey, want: http.StatusUnauthorized},
+		{name: "revoked key", err: ports.ErrKeyRevoked, want: http.StatusUnauthorized},
+		{name: "disabled tenant", err: ports.ErrTenantDisabled, want: http.StatusForbidden},
+		// A registry that cannot be reached is not the caller's fault and
+		// must not read as a rejection.
+		{name: "registry down", err: errors.New("dial tcp: connection refused"), want: http.StatusServiceUnavailable},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			p := unusedProvider(ctrl, "openai")
+			r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5")}, nil)
+
+			h := authedHandler(t, r, res, stubAuth{err: tt.err})
+
+			resp := post(t, h, `{"model":"fast","messages":[]}`, nil)
+			if resp.StatusCode != tt.want {
+				t.Fatalf("status = %d, want %d (body %s)", resp.StatusCode, tt.want, readBody(t, resp))
+			}
+		})
+	}
+}
+
+// An unknown key and a revoked one must be indistinguishable, or the
+// response becomes an oracle for probing which keys ever existed.
+func TestCompletions_DoesNotDistinguishUnknownFromRevoked(t *testing.T) {
+	body := func(err error) string {
+		ctrl := gomock.NewController(t)
+		p := unusedProvider(ctrl, "openai")
+		r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5")}, nil)
+
+		h := authedHandler(t, r, res, stubAuth{err: err})
+		return readBody(t, post(t, h, `{"model":"fast","messages":[]}`, nil))
+	}
+
+	if unknown, revoked := body(ports.ErrUnknownKey), body(ports.ErrKeyRevoked); unknown != revoked {
+		t.Errorf("responses differ: unknown = %s revoked = %s", unknown, revoked)
+	}
+}
+
+// The allowlist is checked against the alias the client asked for, which
+// is how a customer keeps a free plan off the expensive model.
+func TestCompletions_EnforcesTheModelAllowlist(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	p := unusedProvider(ctrl, "openai")
+	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5")}, nil)
+
+	h := authedHandler(t, r, res, stubAuth{tenant: "acme", allowlist: []string{"cheap"}})
+
+	resp := post(t, h, `{"model":"fast","messages":[]}`, nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body %s)", resp.StatusCode, readBody(t, resp))
+	}
+}
+
+// A nil allowlist means every alias, which is not the same as an empty
+// one meaning none.
+func TestCompletions_NilAllowlistAllowsEveryModel(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	p := scriptedProvider(ctrl, "openai", chunks("hi"))
+	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5")}, nil)
+
+	h := authedHandler(t, r, res, stubAuth{tenant: "acme", allowlist: nil})
+
+	if resp := post(t, h, `{"model":"fast","messages":[]}`, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", resp.StatusCode, readBody(t, resp))
+	}
+}
+
+// Rejected before dispatch, so there is no record to bill and no
+// upstream call to pay for.
+func TestCompletions_RejectedKeyRecordsNothing(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	p := unusedProvider(ctrl, "openai")
+	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5")}, nil)
+
+	s := &recordingSink{}
+	h := mounted(NewHandler(r, res, dispatch.New(testNowFn), s, testNowFn),
+		stubAuth{err: ports.ErrUnknownKey})
+
+	if resp := post(t, h, `{"model":"fast","messages":[]}`, nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	if n := len(s.Records()); n != 0 {
+		t.Errorf("recorded %d decisions for a rejected key, want 0", n)
+	}
+}
+
+// The key that paid for a request has to reach the record, or revoking a
+// leaked key means guessing which traffic was its.
+func TestCompletions_RecordsTheKeyThatAuthorised(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	p := scriptedProvider(ctrl, "openai", chunks("hi"))
+	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5")}, nil)
+
+	keyID := uuid.New()
+	s := &recordingSink{}
+	h := mounted(NewHandler(r, res, dispatch.New(testNowFn), s, testNowFn),
+		stubAuth{tenant: "acme", keyID: keyID})
+
+	if resp := post(t, h, `{"model":"fast","messages":[]}`, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	records := s.Records()
+	if len(records) != 1 {
+		t.Fatalf("recorded %d decisions, want 1", len(records))
+	}
+	if records[0].KeyID != keyID {
+		t.Errorf("KeyID = %v, want %v", records[0].KeyID, keyID)
+	}
+	if records[0].Tenant != "acme" {
+		t.Errorf("Tenant = %q, want the one the key resolved to", records[0].Tenant)
+	}
+}
+
+func TestBearerToken(t *testing.T) {
+	tests := []struct {
+		name, header, want string
+	}{
+		{name: "reads a bearer token", header: "Bearer gr_abc", want: "gr_abc"},
+		{name: "accepts any casing of the scheme", header: "bearer gr_abc", want: "gr_abc"},
+		{name: "trims surrounding space", header: "Bearer   gr_abc  ", want: "gr_abc"},
+		{name: "ignores another scheme", header: "Basic gr_abc", want: ""},
+		{name: "ignores a bare token", header: "gr_abc", want: ""},
+		{name: "ignores an empty header", header: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := http.Header{}
+			if tt.header != "" {
+				h.Set("Authorization", tt.header)
+			}
+			if got := bearerToken(h); got != tt.want {
+				t.Errorf("bearerToken() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A route mounted without Authenticate has no identity to read. It must
+// reject rather than serve traffic nothing can bill.
+func TestCompletions_UnwrappedRouteFailsClosed(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	p := unusedProvider(ctrl, "openai")
+	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5")}, nil)
+
+	bare := NewHandler(r, res, dispatch.New(testNowFn), &recordingSink{}, testNowFn)
+
+	resp := post(t, http.HandlerFunc(bare.Completions), `{"model":"fast","messages":[]}`, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body %s)", resp.StatusCode, readBody(t, resp))
+	}
+}
+
+// /healthz answers without a credential on purpose: a liveness probe
+// that needs one stops answering exactly when the credential store is
+// the thing that broke.
+func TestServer_HealthzNeedsNoCredential(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	p := unusedProvider(ctrl, "openai")
+	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5")}, nil)
+
+	h := NewHandler(r, res, dispatch.New(testNowFn), &recordingSink{}, testNowFn)
+	srv := httptest.NewServer(NewServer("", h, stubAuth{err: ports.ErrUnknownKey}).Handler)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
 }

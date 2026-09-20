@@ -1,6 +1,10 @@
 package domains
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 // RoutingDecision is the audit record for one request: what was asked,
 // what was decided, why, what happened, and what it cost.
@@ -8,6 +12,10 @@ type RoutingDecision struct {
 	ID         DecisionID
 	OccurredAt time.Time
 	Tenant     Tenant
+
+	// KeyID is the credential that authorised the request, zero when
+	// nothing did.
+	KeyID uuid.UUID
 
 	// Request is what the client asked for, without the body.
 	Request RequestSummary
@@ -42,6 +50,7 @@ func NewRoutingDecision(
 		ID:         id,
 		OccurredAt: facts.ReceivedAt,
 		Tenant:     facts.Tenant,
+		KeyID:      facts.KeyID,
 		Request: RequestSummary{
 			RequestedModel: facts.RequestedModel,
 			Stream:         facts.Stream,

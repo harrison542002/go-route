@@ -4,7 +4,6 @@ listen: ":4000"
 #   type: log
 
 sink:
-  type: postgres
   dsn: ${DATABASE_URL}
   buffer_size: 4096
   batch_size: 100

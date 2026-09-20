@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/harrison542002/go-route/internal/core/domains"
-	"github.com/harrison542002/go-route/internal/ports"
 	"gopkg.in/yaml.v3"
 )
 
@@ -22,12 +21,15 @@ type Config struct {
 	Pricing   Pricing             `yaml:"pricing"`
 }
 
+// Sink configures the one place records go. There is no type to choose:
+// go-route cannot authenticate a request without api_keys, so Postgres
+// is required to serve traffic at all, and a second destination would
+// only be a way to serve requests it cannot attribute.
 type Sink struct {
-	Type          string        `yaml:"type"`
+	DSN           string        `yaml:"dsn"`
 	BufferSize    int           `yaml:"buffer_size"`
 	BatchSize     int           `yaml:"batch_size"`
 	FlushInterval time.Duration `yaml:"flush_interval"`
-	DSN           string        `yaml:"dsn"`
 }
 
 type Provider struct {
@@ -93,10 +95,6 @@ func Load(path string) (*Config, error) {
 
 	if cfg.Listen == "" {
 		cfg.Listen = ":4000"
-	}
-
-	if cfg.Sink.Type == "" {
-		cfg.Sink.Type = string(ports.LOG)
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -165,10 +163,8 @@ func (c *Config) validate() error {
 		}
 	}
 
-	switch c.Sink.Type {
-	case string(ports.LOG), string(ports.POSTGRES), string(ports.NONE):
-	default:
-		errs = append(errs, fmt.Sprintf("sink: unknown type %q (log, memory, none)", c.Sink.Type))
+	if c.Sink.DSN == "" {
+		errs = append(errs, "sink: dsn is required; go-route needs Postgres to authenticate and to record spend")
 	}
 
 	errs = append(errs, c.validatePricing()...)

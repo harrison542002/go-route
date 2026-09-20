@@ -1,13 +1,19 @@
-// Package e2e wires the real components together and drives them over a
-// real socket against a fake upstream. It is the only place where a
-// config file, the router, the resolver, the dispatcher, the adapter, the
-// sink, and the HTTP layer are exercised as one system.
-package e2e
+//go:build integration
+
+// End-to-end: the real components wired together and driven over a real
+// socket against a fake upstream. The only place where a config file, the
+// router, the resolver, the dispatcher, the provider adapter, the sink and
+// the HTTP layer are exercised as one system.
+//
+// It lives under the integration tag because that system now includes
+// Postgres: go-route cannot authenticate a request without api_keys.
+package integration
 
 import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -89,8 +95,11 @@ func fail(status int) http.HandlerFunc {
 func boot(t *testing.T, yaml string) *httptest.Server {
 	t.Helper()
 
+	// Postgres is not optional any more, so every booted config points at
+	// the suite's migrated container.
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+	withDSN := fmt.Sprintf("sink:\n  dsn: %q\n%s", dsn, yaml)
+	if err := os.WriteFile(path, []byte(withDSN), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -113,14 +122,23 @@ func boot(t *testing.T, yaml string) *httptest.Server {
 		}
 	})
 
-	srv := httptest.NewServer(httpapi.NewServer("", a.Handler).Handler)
+	srv := httptest.NewServer(httpapi.NewServer("", a.Handler, a.Auth).Handler)
 	t.Cleanup(srv.Close)
 	return srv
 }
 
 func post(t *testing.T, srv *httptest.Server, body string) *http.Response {
 	t.Helper()
-	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+
+	req, err := http.NewRequest(http.MethodPost,
+		srv.URL+"/v1/chat/completions", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+e2eKey)
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,9 +432,8 @@ models:
 			want: "unset environment",
 		},
 		{
-			name: "unknown sink type",
+			name: "missing dsn",
 			yaml: `
-sink: {type: nonsense}
 providers:
   p: {type: oaicompat, base_url: http://x/v1, api_key: k}
 targets:
@@ -424,7 +441,7 @@ targets:
 models:
   chat: [p/m]
 `,
-			want: "sink",
+			want: "dsn is required",
 		},
 		{
 			name: "pricing references an unknown target",

@@ -14,6 +14,8 @@ import (
 
 const metaPrefix = "x-go-route-"
 
+const tenantKey = "tenant"
+
 var ErrInvalidRequest = errors.New("invalid request")
 
 type completionProbe struct {
@@ -58,7 +60,7 @@ func extractMetadata(h http.Header) map[string]string {
 		}
 
 		key := strings.TrimPrefix(lower, metaPrefix)
-		if key == "" {
+		if key == "" || key == tenantKey {
 			continue
 		}
 

@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/harrison542002/go-route/internal/core/domains"
+	"github.com/harrison542002/go-route/internal/ports"
 )
 
 func statusFor(o domains.Outcome) int {
@@ -38,7 +41,6 @@ func statusFor(o domains.Outcome) int {
 	}
 }
 
-// writeError sends an OpenAI-shaped error envelope.
 func writeError(w http.ResponseWriter, status int, message, errType string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -48,8 +50,6 @@ func writeError(w http.ResponseWriter, status int, message, errType string) {
 	})
 }
 
-// lastMessage returns the most recent failure message from an exhausted
-// outcome, for surfacing to the client.
 func lastMessage(o domains.Outcome) string {
 	if len(o.Attempts) == 0 {
 		return "no upstream targets were available"
@@ -66,4 +66,33 @@ func lastMessage(o domains.Outcome) string {
 	default:
 		return "all upstream targets failed"
 	}
+}
+
+func writeAuthError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ports.ErrNoCredentials):
+		unauthorized(w, "missing api key: send it as Authorization: Bearer <key>")
+
+	case errors.Is(err, ports.ErrUnknownKey), errors.Is(err, ports.ErrKeyRevoked):
+		// One message for both, so the response cannot be used to tell a
+		// key that never existed from one that was withdrawn.
+		unauthorized(w, "invalid api key")
+
+	case errors.Is(err, ports.ErrTenantDisabled):
+		writeError(w, http.StatusForbidden, "tenant is disabled", "permission_error")
+
+	case errors.Is(err, ports.ErrModelNotAllowed):
+		writeError(w, http.StatusForbidden, err.Error(), "permission_error")
+
+	default:
+		slog.Error("authentication failed", "err", err)
+		writeError(w, http.StatusServiceUnavailable,
+			"authentication is unavailable", "internal_error")
+	}
+}
+
+func unauthorized(w http.ResponseWriter, message string) {
+	// RFC 9110: a 401 has to say what scheme would satisfy it.
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	writeError(w, http.StatusUnauthorized, message, "authentication_error")
 }

@@ -19,13 +19,7 @@ var _ = Describe("PostgresWriter", func() {
 	BeforeEach(func() {
 		truncate()
 
-		c, cancel := ctx()
-		defer cancel()
-
-		var err error
-		writer, err = sink.NewPostgresWriter(c, dsn)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(writer.Close)
+		writer = sink.NewPostgresWriter(pool)
 	})
 
 	write := func(batch ...domains.RoutingDecision) error {
@@ -35,42 +29,97 @@ var _ = Describe("PostgresWriter", func() {
 	}
 
 	Describe("schema", func() {
-		It("has created the decisions table", func() {
+		It("has created every table the design calls for", func() {
 			Expect(countRows(`
 				SELECT count(*) FROM information_schema.tables
-				WHERE table_name = 'decisions'`)).To(Equal(1))
+				WHERE table_schema = 'public'
+				  AND table_name IN ('tenants', 'api_keys', 'quotas', 'usage_counters',
+				                     'usage_ledger', 'audit_log', 'idempotency_keys')`),
+			).To(Equal(7))
 		})
 
-		It("is idempotent across restarts", func() {
-			c, cancel := ctx()
-			defer cancel()
+		It("has dropped the decisions table it replaced", func() {
+			Expect(countRows(`
+				SELECT count(*) FROM information_schema.tables
+				WHERE table_name = 'decisions'`)).To(BeZero())
+		})
 
-			second, err := sink.NewPostgresWriter(c, dsn)
-			Expect(err).NotTo(HaveOccurred(), "a restart must not fail on an existing schema")
-			Expect(second.Close()).To(Succeed())
+		It("partitions the two record tables by time", func() {
+			Expect(countRows(`
+				SELECT count(*) FROM pg_partitioned_table p
+				JOIN pg_class c ON c.oid = p.partrelid
+				WHERE c.relname IN ('usage_ledger', 'audit_log')`)).To(Equal(2))
+		})
+
+		It("has partitions ahead of now", func() {
+			Expect(countRows(`
+				SELECT count(*) FROM pg_inherits i
+				JOIN pg_class p ON p.oid = i.inhparent
+				WHERE p.relname = 'usage_ledger'`)).To(BeNumerically(">=", 4),
+				"the month before, the current one, and the months ahead")
+		})
+
+		It("creates no tenants of its own", func() {
+			Expect(countRows("SELECT count(*) FROM tenants WHERE external_id = 'default'")).
+				To(Equal(1), "provisioned by the suite, never by a migration or a write")
+		})
+
+		It("records what Atlas applied", func() {
+			Expect(countRows(
+				"SELECT count(*) FROM atlas_schema_revisions.atlas_schema_revisions")).
+				To(BeNumerically(">=", 6))
+		})
+
+		It("documents the tables in the catalog", func() {
+			Expect(countRows(`
+				SELECT count(*) FROM pg_class c
+				JOIN pg_namespace n ON n.oid = c.relnamespace
+				WHERE n.nspname = 'public'
+				  AND c.relname IN ('tenants', 'api_keys', 'quotas', 'usage_counters',
+				                    'usage_ledger', 'audit_log', 'idempotency_keys')
+				  AND obj_description(c.oid, 'pg_class') IS NOT NULL`)).To(Equal(7),
+				"COMMENT ON puts the rationale where psql and tooling can see it")
+
+			Expect(countRows(`
+				SELECT count(*) FROM pg_attribute a
+				WHERE a.attrelid = 'usage_ledger'::regclass
+				  AND a.attnum > 0
+				  AND col_description(a.attrelid, a.attnum) IS NOT NULL`)).
+				To(BeNumerically(">=", 6))
 		})
 
 		It("creates the indexes reports depend on", func() {
 			Expect(countRows(`
 				SELECT count(*) FROM pg_indexes
-				WHERE tablename = 'decisions'
-				  AND indexname IN ('decisions_tenant_time', 'decisions_metadata', 'decisions_target_time')`),
-			).To(Equal(3))
+				WHERE tablename = 'usage_ledger'
+				  AND indexname IN ('usage_ledger_tenant_time', 'usage_ledger_metadata',
+				                    'usage_ledger_target_time')`)).To(Equal(3))
 		})
 	})
 
 	Describe("writing a batch", func() {
-		It("persists every row", func() {
+		It("persists a ledger row and an audit row per record", func() {
 			Expect(write(newDecision(), newDecision(), newDecision())).To(Succeed())
-			Expect(countRows("SELECT count(*) FROM decisions")).To(Equal(3))
+			Expect(countRows("SELECT count(*) FROM usage_ledger")).To(Equal(3))
+			Expect(countRows("SELECT count(*) FROM audit_log")).To(Equal(3))
+		})
+
+		It("gives both rows the same id, so explain is two point lookups", func() {
+			d := newDecision()
+			Expect(write(d)).To(Succeed())
+
+			Expect(countRows(`
+				SELECT count(*) FROM usage_ledger l
+				JOIN audit_log a ON a.id = l.id
+				WHERE l.id = $1`, d.ID.UUID())).To(Equal(1))
 		})
 
 		It("accepts an empty batch without touching the database", func() {
 			Expect(write()).To(Succeed())
-			Expect(countRows("SELECT count(*) FROM decisions")).To(BeZero())
+			Expect(countRows("SELECT count(*) FROM usage_ledger")).To(BeZero())
 		})
 
-		It("round-trips every scalar column", func() {
+		It("round-trips every ledger column", func() {
 			d := newDecision()
 			Expect(write(d)).To(Succeed())
 
@@ -78,74 +127,139 @@ var _ = Describe("PostgresWriter", func() {
 			defer cancel()
 
 			var (
-				tenant, model, chosen, status, reasonKind, reasonDetail string
-				in, out, cacheRead, reasoning, attemptCount             int
-				costNanos                                               *int64
-				priceTable                                              *string
-				ttft, total                                             int
-				occurredAt                                              time.Time
+				model, status, tokenSource                string
+				in, out, cacheRead, cacheWrite, reasoning int
+				chosen                                    *string
+				costNanos                                 *int64
+				pricingVersion                            *string
+				ttft, total                               *int
+				billable                                  bool
+				startedAt                                 time.Time
 			)
 			err := pool.QueryRow(c, `
-				SELECT tenant, requested_model, chosen_target, status,
-				       reason_kind, reason_detail,
-				       input_tokens, output_tokens, cache_read_tokens, reasoning_tokens,
-				       attempt_count, cost_nanos, price_table_version,
-				       ttft_ms, total_ms, occurred_at
-				FROM decisions WHERE id = $1`, d.ID.UUID()).
-				Scan(&tenant, &model, &chosen, &status, &reasonKind, &reasonDetail,
-					&in, &out, &cacheRead, &reasoning, &attemptCount,
-					&costNanos, &priceTable, &ttft, &total, &occurredAt)
+				SELECT requested_model, chosen_target, status, token_source,
+				       input_tokens, output_tokens, cache_read_tokens,
+				       cache_write_tokens, reasoning_tokens,
+				       cost_nanos, pricing_version, billable,
+				       ttft_ms, total_ms, started_at
+				FROM usage_ledger WHERE id = $1`, d.ID.UUID()).
+				Scan(&model, &chosen, &status, &tokenSource,
+					&in, &out, &cacheRead, &cacheWrite, &reasoning,
+					&costNanos, &pricingVersion, &billable,
+					&ttft, &total, &startedAt)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(tenant).To(Equal("default"))
 			Expect(model).To(Equal("chat"))
-			Expect(chosen).To(Equal("openai/gpt-5-mini"))
+			Expect(chosen).NotTo(BeNil())
+			Expect(*chosen).To(Equal("openai/gpt-5-mini"))
 			Expect(status).To(Equal("ok"))
-			Expect(reasonKind).To(Equal("model_alias"))
-			Expect(reasonDetail).To(Equal("chat"))
+			Expect(tokenSource).To(Equal("provider"))
 
 			Expect(in).To(Equal(80))
 			Expect(out).To(Equal(50))
 			Expect(cacheRead).To(Equal(20), "cached tokens must survive as their own column")
+			Expect(cacheWrite).To(BeZero())
 			Expect(reasoning).To(Equal(10))
-			Expect(attemptCount).To(Equal(1))
 
 			Expect(costNanos).NotTo(BeNil())
 			Expect(*costNanos).To(Equal(int64(120_500)))
-			Expect(priceTable).NotTo(BeNil())
-			Expect(*priceTable).To(Equal("2026-08-01"))
+			Expect(pricingVersion).NotTo(BeNil())
+			Expect(*pricingVersion).To(Equal("2026-08-01"))
+			Expect(billable).To(BeTrue(), "a record is billed unless something says otherwise")
 
-			Expect(ttft).To(Equal(412))
-			Expect(total).To(Equal(1893))
-			Expect(occurredAt.UTC()).To(BeTemporally("==", testTime))
+			Expect(ttft).NotTo(BeNil())
+			Expect(*ttft).To(Equal(412))
+			Expect(total).NotTo(BeNil())
+			Expect(*total).To(Equal(1893))
+			Expect(startedAt.UTC()).To(BeTemporally("==", testTime))
 		})
 
-		It("round-trips the JSONB columns", func() {
+		It("attributes the row to the tenant's id, not its name", func() {
+			d := newDecision()
+			Expect(write(d)).To(Succeed())
+
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE tenant_id = $1",
+				tenantID("default"))).To(Equal(1))
+		})
+
+		It("rejects a record whose tenant was never provisioned", func() {
+			Expect(write(newDecision(withTenant("newco")))).NotTo(Succeed(),
+				"the ledger must not invent the customer a charge is attributed to")
+
+			Expect(countRows("SELECT count(*) FROM tenants WHERE external_id = 'newco'")).
+				To(BeZero(), "a write must never create a tenant as a side effect")
+		})
+
+		It("attributes the row to the key that authorised it", func() {
+			keyID := issueKey("acme", "gr_live_ledger", nil)
+			Expect(write(newDecision(withTenant("acme"), withKey(keyID)))).To(Succeed())
+
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE key_id = $1", keyID)).To(Equal(1))
+			Expect(countRows("SELECT count(*) FROM audit_log WHERE key_id = $1", keyID)).To(Equal(1))
+		})
+
+		It("stores NULL when no key authorised the record", func() {
+			Expect(write(newDecision())).To(Succeed())
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE key_id IS NULL")).To(Equal(1),
+				"a record with no credential behind it must not claim one")
+		})
+
+		It("round-trips the ledger's JSONB columns", func() {
 			d := newDecision()
 			Expect(write(d)).To(Succeed())
 
 			c, cancel := ctx()
 			defer cancel()
 
-			var metadata, attempts, counterfactuals, ladder []byte
+			var metadata, counterfactuals []byte
 			Expect(pool.QueryRow(c, `
-				SELECT metadata, attempts, counterfactuals, ladder
-				FROM decisions WHERE id = $1`, d.ID.UUID()).
-				Scan(&metadata, &attempts, &counterfactuals, &ladder)).To(Succeed())
+				SELECT metadata, counterfactuals
+				FROM usage_ledger WHERE id = $1`, d.ID.UUID()).
+				Scan(&metadata, &counterfactuals)).To(Succeed())
 
 			var meta map[string]string
 			Expect(json.Unmarshal(metadata, &meta)).To(Succeed())
 			Expect(meta).To(HaveKeyWithValue("feature", "auto-tag"))
 
-			var gotAttempts []domains.Attempt
-			Expect(json.Unmarshal(attempts, &gotAttempts)).To(Succeed())
-			Expect(gotAttempts).To(HaveLen(1))
-			Expect(gotAttempts[0].Target).To(Equal("openai/gpt-5-mini"))
-
 			var gotCounter []domains.Counterfactual
 			Expect(json.Unmarshal(counterfactuals, &gotCounter)).To(Succeed())
 			Expect(gotCounter).To(HaveLen(1))
 			Expect(gotCounter[0].Target).To(Equal("openai/gpt-5"))
+		})
+
+		It("records the routing story in the audit row", func() {
+			d := newDecision()
+			Expect(write(d)).To(Succeed())
+
+			c, cancel := ctx()
+			defer cancel()
+
+			var (
+				actor, action            string
+				reasonKind, reasonDetail *string
+				finalTarget              *string
+				ladder, attempts         []byte
+			)
+			Expect(pool.QueryRow(c, `
+				SELECT actor, action, reason_kind, reason_detail, final_target,
+				       ladder, ladder_attempts
+				FROM audit_log WHERE id = $1`, d.ID.UUID()).
+				Scan(&actor, &action, &reasonKind, &reasonDetail, &finalTarget,
+					&ladder, &attempts)).To(Succeed())
+
+			Expect(actor).To(Equal("gateway"))
+			Expect(action).To(Equal("route_request"))
+			Expect(reasonKind).NotTo(BeNil())
+			Expect(*reasonKind).To(Equal("model_alias"))
+			Expect(reasonDetail).NotTo(BeNil())
+			Expect(*reasonDetail).To(Equal("chat"))
+			Expect(finalTarget).NotTo(BeNil())
+			Expect(*finalTarget).To(Equal("openai/gpt-5-mini"))
+
+			var gotAttempts []domains.Attempt
+			Expect(json.Unmarshal(attempts, &gotAttempts)).To(Succeed())
+			Expect(gotAttempts).To(HaveLen(1))
+			Expect(gotAttempts[0].Target).To(Equal("openai/gpt-5-mini"))
 
 			var gotLadder []domains.TargetRef
 			Expect(json.Unmarshal(ladder, &gotLadder)).To(Succeed())
@@ -153,7 +267,7 @@ var _ = Describe("PostgresWriter", func() {
 		})
 	})
 
-	Describe("unpriced decisions", func() {
+	Describe("unpriced records", func() {
 		BeforeEach(func() {
 			Expect(write(
 				newDecision(),
@@ -163,9 +277,9 @@ var _ = Describe("PostgresWriter", func() {
 		})
 
 		It("stores NULL rather than zero", func() {
-			Expect(countRows("SELECT count(*) FROM decisions WHERE cost_nanos IS NULL")).To(Equal(2))
-			Expect(countRows("SELECT count(*) FROM decisions WHERE cost_nanos = 0")).To(BeZero(),
-				"an unpriced decision stored as zero would be indistinguishable from a free one")
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE cost_nanos IS NULL")).To(Equal(2))
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE cost_nanos = 0")).To(BeZero(),
+				"an unpriced record stored as zero would be indistinguishable from a free one")
 		})
 
 		It("is excluded from SUM but countable", func() {
@@ -177,22 +291,22 @@ var _ = Describe("PostgresWriter", func() {
 			Expect(pool.QueryRow(c, `
 				SELECT COALESCE(SUM(cost_nanos), 0),
 				       count(*) FILTER (WHERE cost_nanos IS NULL)
-				FROM decisions`).Scan(&total, &unpricedCount)).To(Succeed())
+				FROM usage_ledger`).Scan(&total, &unpricedCount)).To(Succeed())
 
 			Expect(total).To(Equal(int64(120_500)), "only the priced row contributes")
 			Expect(unpricedCount).To(Equal(2), "a report must be able to disclose its coverage")
 		})
 	})
 
-	Describe("exhausted decisions", func() {
+	Describe("exhausted records", func() {
 		It("stores a NULL chosen_target", func() {
 			Expect(write(newDecision(exhausted()))).To(Succeed())
 
-			Expect(countRows("SELECT count(*) FROM decisions WHERE chosen_target IS NULL")).To(Equal(1))
-			Expect(countRows("SELECT count(*) FROM decisions WHERE status = 'exhausted'")).To(Equal(1))
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE chosen_target IS NULL")).To(Equal(1))
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE status = 'exhausted'")).To(Equal(1))
 		})
 
-		It("preserves the failure detail in attempts", func() {
+		It("preserves the failure detail in the audit row", func() {
 			d := newDecision(exhausted())
 			Expect(write(d)).To(Succeed())
 
@@ -200,13 +314,19 @@ var _ = Describe("PostgresWriter", func() {
 			defer cancel()
 
 			var attempts []byte
-			Expect(pool.QueryRow(c, "SELECT attempts FROM decisions WHERE id = $1", d.ID.UUID()).
-				Scan(&attempts)).To(Succeed())
+			var errMessage *string
+			Expect(pool.QueryRow(c,
+				"SELECT ladder_attempts, error FROM audit_log WHERE id = $1", d.ID.UUID()).
+				Scan(&attempts, &errMessage)).To(Succeed())
 
 			var got []domains.Attempt
 			Expect(json.Unmarshal(attempts, &got)).To(Succeed())
 			Expect(got[0].Failure).NotTo(BeNil())
 			Expect(got[0].Failure.Kind).To(Equal("connect"))
+
+			Expect(errMessage).NotTo(BeNil())
+			Expect(*errMessage).To(Equal("connection refused"),
+				"the last failure belongs in a column, not only inside the JSON")
 		})
 	})
 
@@ -222,7 +342,7 @@ var _ = Describe("PostgresWriter", func() {
 
 		It("finds rows by containment", func() {
 			Expect(countRows(`
-				SELECT count(*) FROM decisions
+				SELECT count(*) FROM usage_ledger
 				WHERE metadata @> '{"feature":"auto-tag"}'`)).To(Equal(2))
 		})
 
@@ -232,7 +352,7 @@ var _ = Describe("PostgresWriter", func() {
 
 			rows, err := pool.Query(c, `
 				SELECT metadata->>'feature', count(*), SUM(cost_nanos)
-				FROM decisions
+				FROM usage_ledger
 				WHERE metadata ? 'feature'
 				GROUP BY 1 ORDER BY 1`)
 			Expect(err).NotTo(HaveOccurred())
@@ -253,7 +373,7 @@ var _ = Describe("PostgresWriter", func() {
 		})
 
 		It("stores an empty map as {} rather than null", func() {
-			Expect(countRows("SELECT count(*) FROM decisions WHERE metadata = '{}'")).To(Equal(1))
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE metadata = '{}'")).To(Equal(1))
 		})
 	})
 
@@ -267,14 +387,15 @@ var _ = Describe("PostgresWriter", func() {
 		})
 
 		It("scopes by tenant", func() {
-			Expect(countRows("SELECT count(*) FROM decisions WHERE tenant = $1", "acme")).To(Equal(2))
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE tenant_id = $1",
+				tenantID("acme"))).To(Equal(2))
 		})
 
 		It("scopes by time range within a tenant", func() {
 			Expect(countRows(`
-				SELECT count(*) FROM decisions
-				WHERE tenant = $1 AND occurred_at >= $2`,
-				"acme", testTime.Add(-24*time.Hour))).To(Equal(1))
+				SELECT count(*) FROM usage_ledger
+				WHERE tenant_id = $1 AND started_at >= $2`,
+				tenantID("acme"), testTime.Add(-24*time.Hour))).To(Equal(1))
 		})
 	})
 
@@ -292,8 +413,30 @@ var _ = Describe("PostgresWriter", func() {
 			Expect(write(dup)).To(Succeed())
 			Expect(write(good, dup)).NotTo(Succeed())
 
-			Expect(countRows("SELECT count(*) FROM decisions WHERE id = $1", good.ID.UUID())).
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE id = $1", good.ID.UUID())).
 				To(BeZero(), "COPY is all-or-nothing; a partial batch would be harder to reason about")
+		})
+
+		It("leaves no ledger row behind when the audit write fails", func() {
+			d := newDecision()
+			Expect(write(d)).To(Succeed())
+
+			c, cancel := ctx()
+			defer cancel()
+			_, err := pool.Exec(c, "DELETE FROM usage_ledger WHERE id = $1", d.ID.UUID())
+			Expect(err).NotTo(HaveOccurred())
+
+			// The surviving audit row makes the replay fail on audit_log's
+			// primary key rather than on the ledger's.
+			Expect(write(d)).NotTo(Succeed())
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE id = $1", d.ID.UUID())).
+				To(BeZero(), "the ledger write must roll back with the audit write")
+		})
+
+		It("rejects a record outside every partition", func() {
+			far := newDecision(withTime(testTime.AddDate(5, 0, 0)))
+			Expect(write(far)).NotTo(Succeed(),
+				"a record with nowhere to go must fail loudly rather than vanish")
 		})
 
 		It("errors on a cancelled context rather than hanging", func() {
@@ -315,7 +458,7 @@ var _ = Describe("PostgresWriter", func() {
 		c, cancel := ctx()
 		defer cancel()
 
-		rows, err := pool.Query(c, "SELECT id FROM decisions ORDER BY id")
+		rows, err := pool.Query(c, "SELECT id FROM usage_ledger ORDER BY id")
 		Expect(err).NotTo(HaveOccurred())
 		defer rows.Close()
 
