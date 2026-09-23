@@ -1,8 +1,5 @@
 listen: ":4000"
 
-# sink:
-#   type: log
-
 sink:
   dsn: ${DATABASE_URL}
   buffer_size: 4096

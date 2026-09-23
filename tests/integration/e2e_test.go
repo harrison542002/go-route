@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/harrison542002/go-route/internal/adapters/inbound/httpapi"
+	"github.com/harrison542002/go-route/internal/adapters/inbound/proxyapi"
 	"github.com/harrison542002/go-route/internal/bootstrap"
 	"github.com/harrison542002/go-route/internal/config"
 	"github.com/harrison542002/go-route/internal/core/sse"
@@ -122,7 +122,7 @@ func boot(t *testing.T, yaml string) *httptest.Server {
 		}
 	})
 
-	srv := httptest.NewServer(httpapi.NewServer("", a.Handler, a.Auth).Handler)
+	srv := httptest.NewServer(proxyapi.NewServer("", a.Handler, a.Auth).Handler)
 	t.Cleanup(srv.Close)
 	return srv
 }

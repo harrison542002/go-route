@@ -8,16 +8,15 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/harrison542002/go-route/internal/adapters/outbound/sink"
-	"github.com/harrison542002/go-route/internal/adapters/outbound/store/postgresql"
+	"github.com/harrison542002/go-route/internal/adapters/repositories"
 	"github.com/harrison542002/go-route/internal/core/domains"
 	"github.com/harrison542002/go-route/internal/ports"
 )
 
 var _ = Describe("Store", func() {
 	var (
-		store  *postgresql.Store
-		writer *sink.PostgresWriter
+		store  *repositories.ObservabilityRepo
+		writer *repositories.RecordWriter
 	)
 
 	BeforeEach(func() {
@@ -26,10 +25,10 @@ var _ = Describe("Store", func() {
 		c, cancel := ctx()
 		defer cancel()
 
-		writer = sink.NewPostgresWriter(pool)
+		writer = repositories.NewRecordWriter(pool)
 
 		var err error
-		store, err = postgresql.NewStore(c, dsn)
+		store, err = repositories.NewObservabilityRepo(c, dsn)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(store.Close)
 	})

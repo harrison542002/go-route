@@ -25,27 +25,88 @@ type Querier interface {
 	//
 	AggregateUsage(ctx context.Context, arg AggregateUsageParams) ([]AggregateUsageRow, error)
 	CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (ApiKey, error)
+	// Returns no row when the name is taken, which the adapter reports as a
+	// conflict. Names are the audit identity, so reusing one would make two
+	// callers indistinguishable in the log.
+	//
+	CreateAdminCredential(ctx context.Context, arg CreateAdminCredentialParams) (AdminCredential, error)
+	CreateAdminRefreshToken(ctx context.Context, arg CreateAdminRefreshTokenParams) (AdminRefreshToken, error)
+	// Returns no row when the email is taken, which the adapter reports as a
+	// conflict. The email is the audit identity, so reusing one would make
+	// two people indistinguishable in the log.
+	//
+	CreateAdminUser(ctx context.Context, arg CreateAdminUserParams) (AdminUser, error)
 	// Admin mutations run inside the transaction they describe, so a quota
-	// change that rolls back leaves no row claiming it happened.
+	// change that rolls back leaves no row claiming it happened. reason_detail
+	// carries the state the mutation left behind, so "who made this tenant
+	// unlimited" is answered by the log rather than by guesswork.
 	//
 	CreateAuditEntry(ctx context.Context, arg CreateAuditEntryParams) (AuditLog, error)
+	// Returns nothing when the external_id is already taken. A signup flow
+	// retrying after a timeout races itself, and DO NOTHING waits for the
+	// other insert to settle instead of aborting the transaction, so the
+	// caller can read back whichever row won and compare it.
+	//
 	CreateTenant(ctx context.Context, arg CreateTenantParams) (Tenant, error)
-	DeleteExpiredIdempotencyKeys(ctx context.Context) error
+	// Swept when the person logs in rather than by a background job: a dead
+	// refresh token names nothing in the audit log, so deleting it loses no
+	// history, and the only rows worth collecting are the ones belonging to
+	// somebody who is here anyway.
+	//
+	DeleteExpiredAdminRefreshTokens(ctx context.Context, arg DeleteExpiredAdminRefreshTokensParams) error
 	DeleteExpiredUsageCounters(ctx context.Context, arg DeleteExpiredUsageCountersParams) error
+	DeleteQuota(ctx context.Context, arg DeleteQuotaParams) (int64, error)
 	// A PUT replaces the whole set for a tenant. Run this and the upserts in
 	// one transaction: deleting the old set and then failing to write the
 	// new one would leave a tenant unlimited.
 	//
 	DeleteQuotasForTenant(ctx context.Context, tenantID uuid.UUID) error
+	DisableAdminUser(ctx context.Context, arg DisableAdminUserParams) (AdminUser, error)
 	DisableTenant(ctx context.Context, id uuid.UUID) (Tenant, error)
+	// Returns nothing when the tenant is already enabled, so a repeated
+	// call is visibly a no-op rather than a second change.
+	//
 	EnableTenant(ctx context.Context, id uuid.UUID) (Tenant, error)
 	EnsureRecordPartitions(ctx context.Context, arg EnsureRecordPartitionsParams) error
+	GetAPIKey(ctx context.Context, id uuid.UUID) (ApiKey, error)
 	// Joins the tenant because a disabled tenant must reject as firmly as a
 	// revoked key.
 	//
 	GetAPIKeyByHash(ctx context.Context, keyHash []byte) (GetAPIKeyByHashRow, error)
+	// Accepts either the name an operator knows or the id a listing shows.
+	// The id is cast to text rather than the reference to a UUID, so a name
+	// that is not a UUID is compared instead of raising.
+	//
+	GetAdminCredentialByRef(ctx context.Context, ref string) (AdminCredential, error)
+	// Admin traffic is a handful of calls a minute, so authentication pays
+	// for a lookup per request rather than a cache. Revocation is then
+	// instant everywhere, with no invalidation channel to get wrong.
+	//
+	// The row is returned whether or not it is revoked or expired: the
+	// caller decides, so that an unknown token, a revoked one and an expired
+	// one take the same path and the response cannot tell them apart. Expiry
+	// is deliberately not a predicate here either, for the same reason it is
+	// not a sweep: the row has to survive its own expiry so the audit rows
+	// naming it stay readable.
+	//
+	GetAdminCredentialByTokenHash(ctx context.Context, tokenHash []byte) (AdminCredential, error)
+	// Joins the person in, because every decision the refresh endpoint makes
+	// needs both: the token has to be live and its owner has to still be
+	// allowed in, and two round trips would be two chances to answer
+	// differently.
+	//
+	GetAdminRefreshTokenByHash(ctx context.Context, tokenHash []byte) (GetAdminRefreshTokenByHashRow, error)
+	// Emails are stored lower-cased and compared as stored, so every lookup
+	// here expects the caller to have normalised already. The CHECK on the
+	// column is what makes that safe to assume.
+	//
+	// The row is returned whether or not the person is disabled: the caller
+	// decides, so that an unknown email and a disabled one take the same
+	// path and the response cannot tell them apart.
+	//
+	GetAdminUserByEmail(ctx context.Context, email string) (AdminUser, error)
+	GetAdminUserByID(ctx context.Context, id uuid.UUID) (AdminUser, error)
 	GetAuditEntry(ctx context.Context, id uuid.UUID) (AuditLog, error)
-	GetIdempotencyKey(ctx context.Context, key string) (IdempotencyKey, error)
 	GetQuota(ctx context.Context, arg GetQuotaParams) (Quota, error)
 	// LEFT JOIN because a tenant with a quota and no traffic yet has no
 	// counter row, and that must read as zero rather than as no quota.
@@ -65,23 +126,53 @@ type Querier interface {
 	InsertUsageLedger(ctx context.Context, arg []InsertUsageLedgerParams) (int64, error)
 	ListAPIKeysByTenant(ctx context.Context, tenantID uuid.UUID) ([]ApiKey, error)
 	ListActiveAPIKeys(ctx context.Context) ([]ListActiveAPIKeysRow, error)
+	ListAdminCredentials(ctx context.Context) ([]AdminCredential, error)
+	ListAdminUsers(ctx context.Context) ([]AdminUser, error)
 	ListAuditEntriesByRequestID(ctx context.Context, arg ListAuditEntriesByRequestIDParams) ([]AuditLog, error)
 	ListAuditEntriesForTenant(ctx context.Context, arg ListAuditEntriesForTenantParams) ([]AuditLog, error)
+	ListAuditEntriesForTenantPage(ctx context.Context, arg ListAuditEntriesForTenantPageParams) ([]AuditLog, error)
 	ListQuotas(ctx context.Context, tenantID uuid.UUID) ([]Quota, error)
 	ListTenants(ctx context.Context, arg ListTenantsParams) ([]Tenant, error)
 	ListUsageCountersForTenant(ctx context.Context, arg ListUsageCountersForTenantParams) ([]UsageCounter, error)
 	// Warms Redis in one pass after a cold start, rather than per tenant.
 	//
 	ListUsageCountersInWindow(ctx context.Context, arg ListUsageCountersInWindowParams) ([]UsageCounter, error)
-	// Returns nothing when the key is already held. The caller compares
-	// request_hash itself: a match replays, a mismatch is 422.
+	// Every admin mutation of a tenant, its keys or its quotas takes this
+	// first, so two writers for one tenant serialise instead of interleaving
+	// a quota replace into a merged set neither of them asked for. NO KEY
+	// UPDATE rather than UPDATE because it does not conflict with the KEY
+	// SHARE lock a foreign-key check takes: the gateway inserting counter
+	// rows for this tenant is never made to wait on an admin call.
 	//
-	PutIdempotencyKey(ctx context.Context, arg PutIdempotencyKeyParams) (IdempotencyKey, error)
+	LockTenant(ctx context.Context, id uuid.UUID) (Tenant, error)
 	RevokeAPIKey(ctx context.Context, id uuid.UUID) (ApiKey, error)
+	RevokeAdminCredential(ctx context.Context, id uuid.UUID) (AdminCredential, error)
+	// Rotation and logout are the same statement: revoked_at always, and
+	// replaced_by only when something took this token's place. Returns no
+	// row when the token was already revoked, which is what tells a refresh
+	// it is looking at a replay rather than a race.
+	//
+	RevokeAdminRefreshToken(ctx context.Context, arg RevokeAdminRefreshTokenParams) (AdminRefreshToken, error)
+	RevokeAdminUserRefreshTokens(ctx context.Context, arg RevokeAdminUserRefreshTokensParams) error
+	SetAdminUserPassword(ctx context.Context, arg SetAdminUserPasswordParams) (AdminUser, error)
 	// Best-effort and out of band: this answers "is the key still in use
 	// before I revoke it", which tolerates being minutes stale.
 	//
 	TouchAPIKey(ctx context.Context, arg TouchAPIKeyParams) error
+	// Best-effort and out of band, as with api_keys: this answers "is this
+	// credential still in use before I revoke it", which tolerates being
+	// minutes stale, and must never fail or delay the request it describes.
+	//
+	TouchAdminCredential(ctx context.Context, arg TouchAdminCredentialParams) error
+	TouchAdminUserLogin(ctx context.Context, arg TouchAdminUserLoginParams) error
+	// A revoked key keeps the allowlist it was revoked with: that is what
+	// its old ledger rows were admitted under.
+	//
+	UpdateAPIKeyAllowlist(ctx context.Context, arg UpdateAPIKeyAllowlistParams) (ApiKey, error)
+	// external_id is deliberately not updatable: it is the join key into the
+	// customer's own system, and changing it would orphan their records.
+	//
+	UpdateTenant(ctx context.Context, arg UpdateTenantParams) (Tenant, error)
 	UpsertQuota(ctx context.Context, arg UpsertQuotaParams) (Quota, error)
 }
 

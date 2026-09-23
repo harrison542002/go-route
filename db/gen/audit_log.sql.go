@@ -15,8 +15,8 @@ import (
 const createAuditEntry = `-- name: CreateAuditEntry :one
 INSERT INTO audit_log (
     id, ts, tenant_id, key_id, actor, action, request_id,
-    ladder, ladder_attempts, status_code, error
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    reason_detail, ladder, ladder_attempts, status_code, error
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING id, ts, tenant_id, key_id, actor, action, request_id, reason_kind, reason_detail, policy_version, ladder, ladder_attempts, final_target, status_code, error
 `
 
@@ -28,6 +28,7 @@ type CreateAuditEntryParams struct {
 	Actor          string
 	Action         string
 	RequestID      *string
+	ReasonDetail   *string
 	Ladder         []byte
 	LadderAttempts []byte
 	StatusCode     *int32
@@ -35,7 +36,9 @@ type CreateAuditEntryParams struct {
 }
 
 // Admin mutations run inside the transaction they describe, so a quota
-// change that rolls back leaves no row claiming it happened.
+// change that rolls back leaves no row claiming it happened. reason_detail
+// carries the state the mutation left behind, so "who made this tenant
+// unlimited" is answered by the log rather than by guesswork.
 func (q *Queries) CreateAuditEntry(ctx context.Context, arg CreateAuditEntryParams) (AuditLog, error) {
 	row := q.db.QueryRow(ctx, createAuditEntry,
 		arg.ID,
@@ -45,6 +48,7 @@ func (q *Queries) CreateAuditEntry(ctx context.Context, arg CreateAuditEntryPara
 		arg.Actor,
 		arg.Action,
 		arg.RequestID,
+		arg.ReasonDetail,
 		arg.Ladder,
 		arg.LadderAttempts,
 		arg.StatusCode,
@@ -185,6 +189,71 @@ func (q *Queries) ListAuditEntriesForTenant(ctx context.Context, arg ListAuditEn
 		arg.TenantID,
 		arg.Since,
 		arg.Until,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AuditLog{}
+	for rows.Next() {
+		var i AuditLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.Ts,
+			&i.TenantID,
+			&i.KeyID,
+			&i.Actor,
+			&i.Action,
+			&i.RequestID,
+			&i.ReasonKind,
+			&i.ReasonDetail,
+			&i.PolicyVersion,
+			&i.Ladder,
+			&i.LadderAttempts,
+			&i.FinalTarget,
+			&i.StatusCode,
+			&i.Error,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAuditEntriesForTenantPage = `-- name: ListAuditEntriesForTenantPage :many
+SELECT id, ts, tenant_id, key_id, actor, action, request_id, reason_kind, reason_detail, policy_version, ladder, ladder_attempts, final_target, status_code, error FROM audit_log
+WHERE tenant_id = $1
+  AND ts >= $2
+  AND ts < $3
+  AND ($4::timestamptz IS NULL
+       OR ts <= $4::timestamptz)
+  AND ($4::timestamptz IS NULL
+       OR (ts, id) < ($4::timestamptz, $5::uuid))
+ORDER BY ts DESC, id DESC
+LIMIT $6
+`
+
+type ListAuditEntriesForTenantPageParams struct {
+	TenantID *uuid.UUID
+	Since    time.Time
+	Until    time.Time
+	CursorTs *time.Time
+	CursorID *uuid.UUID
+	RowLimit int32
+}
+
+func (q *Queries) ListAuditEntriesForTenantPage(ctx context.Context, arg ListAuditEntriesForTenantPageParams) ([]AuditLog, error) {
+	rows, err := q.db.Query(ctx, listAuditEntriesForTenantPage,
+		arg.TenantID,
+		arg.Since,
+		arg.Until,
+		arg.CursorTs,
+		arg.CursorID,
 		arg.RowLimit,
 	)
 	if err != nil {

@@ -10,7 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/harrison542002/go-route/internal/adapters/outbound/store/postgresql"
+	"github.com/harrison542002/go-route/internal/adapters/repositories"
 	"github.com/harrison542002/go-route/internal/core/domains"
 	"github.com/harrison542002/go-route/internal/ports"
 )
@@ -57,7 +57,7 @@ func runExplain(ctx context.Context, rawID string, jsonOut bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	store, err := postgresql.NewStore(ctx, dsn)
+	store, err := repositories.NewObservabilityRepo(ctx, dsn)
 	if err != nil {
 		return err
 	}

@@ -1,7 +1,11 @@
-h1:MOPWq3UckUSJC8shKhv0cswYofvw7sw3lF4gDcyUlgM=
+h1:v7vf5CU3BftbMrcqDuU8W6NyPxua6kbh22hOInBkBqM=
 0001_identity.sql h1:izOYzQfeVnfR1Rl1pXV+ji0qbV6uuwzpi2I7dza/OJI=
 0002_policy.sql h1:uyzB6PStao4Xx748gEmNCjBSdqGaJLMHop/GNMcqo2I=
 0003_partitions.sql h1:rxhgakqsz1q9hPm+GUdkiijTFbrLcvNKgh0otnpW7FE=
 0004_usage_ledger.sql h1:5JDdOfeLjMyKxqGl0/J7wfi1MoiKwPSubHu6BMDlRKc=
 0005_audit_log.sql h1:YEQJ6pmLyCGzH5Pe0qDPZSaEgDMNEuck1IfOZ6VMf4Y=
 0006_idempotency_keys.sql h1:QWpaKvzY1y8FHu8Nf1QVfLVmRgz3eLkbX1IL16mpB0E=
+0007_admin_credentials.sql h1:JaU2Usu3e32L881l/QG/h2NvV+i+3RZTZyIxR6xJkck=
+0008_drop_idempotency_keys.sql h1:/si7a0aHamax/uKUksyNr0aYGJkArk3x3slb6NKpKK4=
+0009_admin_credential_roles.sql h1:/ZqYZwrUEhhiguB/owloGgoeVYf6Tr8q+IOvhP9cpxg=
+0010_admin_users.sql h1:ABIYTcqaVALpkS+ixoD0sRk+HtJiWeifqSnGU+yC784=

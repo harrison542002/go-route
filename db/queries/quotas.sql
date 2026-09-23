@@ -11,6 +11,9 @@ SELECT * FROM quotas WHERE tenant_id = $1 AND window_kind = $2;
 -- name: DeleteQuotasForTenant :exec
 DELETE FROM quotas WHERE tenant_id = $1;
 
+-- name: DeleteQuota :execrows
+DELETE FROM quotas WHERE tenant_id = $1 AND window_kind = $2;
+
 -- name: UpsertQuota :one
 INSERT INTO quotas (
     tenant_id, window_kind, period_start, period_end,

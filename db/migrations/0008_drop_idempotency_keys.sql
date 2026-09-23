@@ -1,0 +1,15 @@
+-- The admin API's writes are safe to repeat because of how this schema is
+-- shaped, not because a generic replay layer watched over them: external_id
+-- is unique, so a retried tenant creation returns the tenant it made the
+-- first time; disable, enable and revoke are timestamps, so setting one that
+-- is already set changes nothing; an update is last-writer-wins, which is
+-- what a caller resending the same body wants anyway. Only minting a key is
+-- not a repeat, and a tenant is meant to hold many keys: a second one is
+-- listable and revocable, not a leak nobody can see.
+--
+-- What the layer cost was a table, an hourly sweep to keep it from growing
+-- without bound, and a contract that the retry present exactly the bytes the
+-- first attempt did -- which a client that re-serialises its request, as any
+-- client with a map in it does, breaks by reordering two keys, turning a
+-- retry into a 422 instead of the replay it asked for.
+DROP TABLE idempotency_keys;

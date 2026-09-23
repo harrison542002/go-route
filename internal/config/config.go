@@ -21,10 +21,6 @@ type Config struct {
 	Pricing   Pricing             `yaml:"pricing"`
 }
 
-// Sink configures the one place records go. There is no type to choose:
-// go-route cannot authenticate a request without api_keys, so Postgres
-// is required to serve traffic at all, and a second destination would
-// only be a way to serve requests it cannot attribute.
 type Sink struct {
 	DSN           string        `yaml:"dsn"`
 	BufferSize    int           `yaml:"buffer_size"`
@@ -96,7 +92,6 @@ func Load(path string) (*Config, error) {
 	if cfg.Listen == "" {
 		cfg.Listen = ":4000"
 	}
-
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}

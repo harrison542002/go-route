@@ -48,6 +48,26 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Api
 	return i, err
 }
 
+const getAPIKey = `-- name: GetAPIKey :one
+SELECT id, tenant_id, key_hash, key_prefix, model_allowlist, created_at, last_used_at, revoked_at FROM api_keys WHERE id = $1
+`
+
+func (q *Queries) GetAPIKey(ctx context.Context, id uuid.UUID) (ApiKey, error) {
+	row := q.db.QueryRow(ctx, getAPIKey, id)
+	var i ApiKey
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.KeyHash,
+		&i.KeyPrefix,
+		&i.ModelAllowlist,
+		&i.CreatedAt,
+		&i.LastUsedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const getAPIKeyByHash = `-- name: GetAPIKeyByHash :one
 SELECT api_keys.id, api_keys.tenant_id, api_keys.key_hash, api_keys.key_prefix, api_keys.model_allowlist, api_keys.created_at, api_keys.last_used_at, api_keys.revoked_at, tenants.id, tenants.external_id, tenants.name, tenants.metadata, tenants.created_at, tenants.disabled_at
 FROM api_keys
@@ -204,4 +224,33 @@ type TouchAPIKeyParams struct {
 func (q *Queries) TouchAPIKey(ctx context.Context, arg TouchAPIKeyParams) error {
 	_, err := q.db.Exec(ctx, touchAPIKey, arg.UsedAt, arg.ID)
 	return err
+}
+
+const updateAPIKeyAllowlist = `-- name: UpdateAPIKeyAllowlist :one
+UPDATE api_keys SET model_allowlist = $2
+WHERE id = $1 AND revoked_at IS NULL
+RETURNING id, tenant_id, key_hash, key_prefix, model_allowlist, created_at, last_used_at, revoked_at
+`
+
+type UpdateAPIKeyAllowlistParams struct {
+	ID             uuid.UUID
+	ModelAllowlist []string
+}
+
+// A revoked key keeps the allowlist it was revoked with: that is what
+// its old ledger rows were admitted under.
+func (q *Queries) UpdateAPIKeyAllowlist(ctx context.Context, arg UpdateAPIKeyAllowlistParams) (ApiKey, error) {
+	row := q.db.QueryRow(ctx, updateAPIKeyAllowlist, arg.ID, arg.ModelAllowlist)
+	var i ApiKey
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.KeyHash,
+		&i.KeyPrefix,
+		&i.ModelAllowlist,
+		&i.CreatedAt,
+		&i.LastUsedAt,
+		&i.RevokedAt,
+	)
+	return i, err
 }

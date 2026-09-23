@@ -13,7 +13,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/harrison542002/go-route/internal/adapters/outbound/store/postgresql"
+	"github.com/harrison542002/go-route/internal/adapters/repositories"
+	"github.com/harrison542002/go-route/internal/clitime"
 	"github.com/harrison542002/go-route/internal/core/domains"
 	"github.com/harrison542002/go-route/internal/ports"
 )
@@ -70,14 +71,14 @@ different number of output tokens.`,
 func buildSpec(since, until, groupBy, tenant string, limit int) (ports.ReportSpec, error) {
 	now := time.Now()
 
-	sinceT, err := parseWhen(since, now)
+	sinceT, err := clitime.ParseWhen(since, now)
 	if err != nil {
 		return ports.ReportSpec{}, fmt.Errorf("--since: %w", err)
 	}
 
 	untilT := now
 	if until != "" {
-		if untilT, err = parseWhen(until, now); err != nil {
+		if untilT, err = clitime.ParseWhen(until, now); err != nil {
 			return ports.ReportSpec{}, fmt.Errorf("--until: %w", err)
 		}
 	}
@@ -108,38 +109,6 @@ func buildSpec(since, until, groupBy, tenant string, limit int) (ports.ReportSpe
 	return spec, spec.Validate()
 }
 
-// parseWhen accepts a duration back from now ("30d", "24h") or an
-// absolute date ("2026-08-01"). Durations are the common case, so they
-// are tried first.
-func parseWhen(s string, now time.Time) (time.Time, error) {
-	if d, ok := parseDayDuration(s); ok {
-		return now.Add(-d), nil
-	}
-	if d, err := time.ParseDuration(s); err == nil {
-		return now.Add(-d), nil
-	}
-	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04", "2006-01-02"} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t, nil
-		}
-	}
-	return time.Time{}, fmt.Errorf(
-		"%q is neither a duration (30d, 24h) nor a date (2026-08-01)", s)
-}
-
-// parseDayDuration handles the "30d" form, which time.ParseDuration does
-// not support.
-func parseDayDuration(s string) (time.Duration, bool) {
-	if !strings.HasSuffix(s, "d") {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
-	if err != nil || n < 0 {
-		return 0, false
-	}
-	return time.Duration(n) * 24 * time.Hour, true
-}
-
 func runReport(ctx context.Context, spec ports.ReportSpec, format string) error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -153,7 +122,7 @@ func runReport(ctx context.Context, spec ports.ReportSpec, format string) error 
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	store, err := postgresql.NewStore(ctx, dsn)
+	store, err := repositories.NewObservabilityRepo(ctx, dsn)
 	if err != nil {
 		return err
 	}

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/harrison542002/go-route/internal/adapters/outbound/store/postgresql"
 	"github.com/harrison542002/go-route/internal/core/domains"
+	"github.com/harrison542002/go-route/internal/drivers/postgresql"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -148,7 +148,8 @@ func truncate() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := pool.Exec(ctx, "TRUNCATE usage_ledger, audit_log")
+	_, err := pool.Exec(ctx,
+		"TRUNCATE usage_ledger, audit_log, admin_credentials, admin_refresh_tokens, admin_users")
 	Expect(err).NotTo(HaveOccurred())
 }
 

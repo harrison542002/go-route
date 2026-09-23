@@ -14,6 +14,7 @@ import (
 const createTenant = `-- name: CreateTenant :one
 INSERT INTO tenants (id, external_id, name, metadata)
 VALUES ($1, $2, $3, $4)
+ON CONFLICT (external_id) DO NOTHING
 RETURNING id, external_id, name, metadata, created_at, disabled_at
 `
 
@@ -24,6 +25,10 @@ type CreateTenantParams struct {
 	Metadata   []byte
 }
 
+// Returns nothing when the external_id is already taken. A signup flow
+// retrying after a timeout races itself, and DO NOTHING waits for the
+// other insert to settle instead of aborting the transaction, so the
+// caller can read back whichever row won and compare it.
 func (q *Queries) CreateTenant(ctx context.Context, arg CreateTenantParams) (Tenant, error) {
 	row := q.db.QueryRow(ctx, createTenant,
 		arg.ID,
@@ -65,10 +70,12 @@ func (q *Queries) DisableTenant(ctx context.Context, id uuid.UUID) (Tenant, erro
 
 const enableTenant = `-- name: EnableTenant :one
 UPDATE tenants SET disabled_at = NULL
-WHERE id = $1
+WHERE id = $1 AND disabled_at IS NOT NULL
 RETURNING id, external_id, name, metadata, created_at, disabled_at
 `
 
+// Returns nothing when the tenant is already enabled, so a repeated
+// call is visibly a no-op rather than a second change.
 func (q *Queries) EnableTenant(ctx context.Context, id uuid.UUID) (Tenant, error) {
 	row := q.db.QueryRow(ctx, enableTenant, id)
 	var i Tenant
@@ -156,4 +163,58 @@ func (q *Queries) ListTenants(ctx context.Context, arg ListTenantsParams) ([]Ten
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockTenant = `-- name: LockTenant :one
+SELECT id, external_id, name, metadata, created_at, disabled_at FROM tenants WHERE id = $1 FOR NO KEY UPDATE
+`
+
+// Every admin mutation of a tenant, its keys or its quotas takes this
+// first, so two writers for one tenant serialise instead of interleaving
+// a quota replace into a merged set neither of them asked for. NO KEY
+// UPDATE rather than UPDATE because it does not conflict with the KEY
+// SHARE lock a foreign-key check takes: the gateway inserting counter
+// rows for this tenant is never made to wait on an admin call.
+func (q *Queries) LockTenant(ctx context.Context, id uuid.UUID) (Tenant, error) {
+	row := q.db.QueryRow(ctx, lockTenant, id)
+	var i Tenant
+	err := row.Scan(
+		&i.ID,
+		&i.ExternalID,
+		&i.Name,
+		&i.Metadata,
+		&i.CreatedAt,
+		&i.DisabledAt,
+	)
+	return i, err
+}
+
+const updateTenant = `-- name: UpdateTenant :one
+UPDATE tenants SET
+    name     = COALESCE($1, name),
+    metadata = COALESCE($2, metadata)
+WHERE id = $3
+RETURNING id, external_id, name, metadata, created_at, disabled_at
+`
+
+type UpdateTenantParams struct {
+	Name     *string
+	Metadata []byte
+	ID       uuid.UUID
+}
+
+// external_id is deliberately not updatable: it is the join key into the
+// customer's own system, and changing it would orphan their records.
+func (q *Queries) UpdateTenant(ctx context.Context, arg UpdateTenantParams) (Tenant, error) {
+	row := q.db.QueryRow(ctx, updateTenant, arg.Name, arg.Metadata, arg.ID)
+	var i Tenant
+	err := row.Scan(
+		&i.ID,
+		&i.ExternalID,
+		&i.Name,
+		&i.Metadata,
+		&i.CreatedAt,
+		&i.DisabledAt,
+	)
+	return i, err
 }
