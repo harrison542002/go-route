@@ -14,7 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/harrison542002/go-route/internal/adapters/inbound/httpapi"
+	"github.com/harrison542002/go-route/internal/adapters/inbound/proxyapi"
 	"github.com/harrison542002/go-route/internal/bootstrap"
 	"github.com/harrison542002/go-route/internal/config"
 )
@@ -45,7 +45,7 @@ func runServe() error {
 		return err
 	}
 
-	server := httpapi.NewServer(cfg.Listen, application.Handler, application.Auth)
+	server := proxyapi.NewServer(cfg.Listen, application.Handler, application.Auth)
 
 	serverCtx, abortInFlight := context.WithCancel(context.Background())
 	defer abortInFlight()
@@ -54,6 +54,8 @@ func runServe() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Buffered so the listener goroutine is never left blocked on a send nobody
+	// receives.
 	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("listening", "addr", cfg.Listen, "models", modelNames(cfg))
@@ -64,6 +66,7 @@ func runServe() error {
 
 	select {
 	case err := <-errCh:
+		_ = server.Close()
 		_ = application.Close()
 		return err
 	case <-ctx.Done():

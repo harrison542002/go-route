@@ -9,6 +9,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/harrison542002/go-route/internal/adapters/outbound/sink"
+	"github.com/harrison542002/go-route/internal/adapters/repositories"
 )
 
 // The buffered sink and the Postgres writer have only ever been tested
@@ -16,12 +17,12 @@ import (
 // they interact.
 var _ = Describe("Buffered sink over Postgres", func() {
 	var (
-		writer *sink.PostgresWriter
+		writer *repositories.RecordWriter
 		s      *sink.Buffered
 	)
 
 	newSink := func(cfg sink.Config) {
-		writer = sink.NewPostgresWriter(pool)
+		writer = repositories.NewRecordWriter(pool)
 		s = sink.NewBuffered(writer, cfg)
 
 		DeferCleanup(func() {

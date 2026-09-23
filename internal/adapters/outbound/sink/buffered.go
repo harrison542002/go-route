@@ -23,7 +23,7 @@ type Config struct {
 // Buffered decouples Record from persistence
 type Buffered struct {
 	ch     chan domains.RoutingDecision
-	writer Writer
+	writer ports.RecordWriter
 	cfg    Config
 
 	dropped atomic.Int64
@@ -37,7 +37,7 @@ type Buffered struct {
 
 var _ ports.DecisionSink = (*Buffered)(nil)
 
-func NewBuffered(w Writer, cfg Config) *Buffered {
+func NewBuffered(w ports.RecordWriter, cfg Config) *Buffered {
 	if cfg.BufferSize <= 0 {
 		cfg.BufferSize = 4096
 	}

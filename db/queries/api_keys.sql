@@ -7,6 +7,9 @@ FROM api_keys
 JOIN tenants ON tenants.id = api_keys.tenant_id
 WHERE api_keys.key_hash = $1;
 
+-- name: GetAPIKey :one
+SELECT * FROM api_keys WHERE id = $1;
+
 -- name: ListActiveAPIKeys :many
 SELECT sqlc.embed(api_keys), sqlc.embed(tenants)
 FROM api_keys
@@ -22,6 +25,14 @@ ORDER BY created_at DESC;
 -- name: CreateAPIKey :one
 INSERT INTO api_keys (id, tenant_id, key_hash, key_prefix, model_allowlist)
 VALUES ($1, $2, $3, $4, $5)
+RETURNING *;
+
+-- A revoked key keeps the allowlist it was revoked with: that is what
+-- its old ledger rows were admitted under.
+--
+-- name: UpdateAPIKeyAllowlist :one
+UPDATE api_keys SET model_allowlist = $2
+WHERE id = $1 AND revoked_at IS NULL
 RETURNING *;
 
 -- name: RevokeAPIKey :one

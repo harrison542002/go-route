@@ -12,6 +12,23 @@ import (
 	"github.com/google/uuid"
 )
 
+const deleteQuota = `-- name: DeleteQuota :execrows
+DELETE FROM quotas WHERE tenant_id = $1 AND window_kind = $2
+`
+
+type DeleteQuotaParams struct {
+	TenantID   uuid.UUID
+	WindowKind WindowKind
+}
+
+func (q *Queries) DeleteQuota(ctx context.Context, arg DeleteQuotaParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteQuota, arg.TenantID, arg.WindowKind)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteQuotasForTenant = `-- name: DeleteQuotasForTenant :exec
 DELETE FROM quotas WHERE tenant_id = $1
 `

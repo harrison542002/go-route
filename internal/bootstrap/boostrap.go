@@ -6,16 +6,17 @@ import (
 	"context"
 	"time"
 
-	"github.com/harrison542002/go-route/internal/adapters/inbound/httpapi"
-	"github.com/harrison542002/go-route/internal/adapters/outbound/store/postgresql"
+	"github.com/harrison542002/go-route/internal/adapters/inbound/proxyapi"
+	"github.com/harrison542002/go-route/internal/adapters/repositories"
 	"github.com/harrison542002/go-route/internal/config"
+	"github.com/harrison542002/go-route/internal/drivers/postgresql"
 	"github.com/harrison542002/go-route/internal/ports"
 	"github.com/harrison542002/go-route/internal/usecases/dispatch"
 	"github.com/harrison542002/go-route/internal/usecases/routing"
 )
 
 type App struct {
-	Handler *httpapi.Handler
+	Handler *proxyapi.Handler
 	Auth    ports.Authenticator
 	Sink    ports.DecisionSink
 	Close   func() error
@@ -32,17 +33,11 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
-	// One pool for the whole process, shared by the writer, the
-	// authenticator and partition maintenance.
 	pool, err := postgresql.Connect(ctx, cfg.Sink.DSN)
 	if err != nil {
 		return nil, err
 	}
 
-	// Ensure once here so a database with no partitions fails startup,
-	// rather than being discovered at the first write with nowhere to
-	// write to. The ticker keeps coverage ahead of the calendar
-	// afterwards, so uptime never outruns it.
 	partitions := postgresql.NewPartitions(pool)
 	if err := partitions.Ensure(ctx); err != nil {
 		pool.Close()
@@ -60,13 +55,11 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	}
 
 	return &App{
-		Handler: httpapi.NewHandler(
+		Handler: proxyapi.NewHandler(
 			table, resolver, dispatch.New(time.Now), builtSink, time.Now),
-		Auth: postgresql.NewAuth(pool),
+		Auth: repositories.NewAuth(pool),
 		Sink: builtSink,
 		Close: func() error {
-			// Callers flush the sink before calling this, so the pool
-			// closing last is what keeps that final batch writable.
 			err := partitions.Stop()
 			pool.Close()
 			return err

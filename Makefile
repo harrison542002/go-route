@@ -1,21 +1,28 @@
-.PHONY: generate sqlc migrate migrate-diff migrate-hash migrate-lint unit-test integration-test test-all
+.PHONY: build build-proxy build-admin generate sqlc openapi migrate migrate-diff migrate-hash migrate-lint unit-test integration-test test-all
 
-generate: sqlc
+build: build-proxy build-admin
+
+build-proxy:
+	go build -o bin/ ./cmd/go-route
+
+build-admin:
+	go build -o bin/ ./cmd/go-route-admin
+
+generate: sqlc openapi
 	go generate ./...
 
 sqlc:
 	go tool sqlc generate
 
-# Applies pending migrations to $DATABASE_URL.
+openapi:
+	go generate ./schemas/admin/gen
+
 migrate:
 	atlas migrate apply --env local
 
-# Writes a new migration from the difference between db/migrations and
-# NAME's desired state. Usage: make migrate-diff NAME=add_something
 migrate-diff:
 	atlas migrate diff $(NAME) --env local
 
-# Re-hashes atlas.sum. Required after editing any migration by hand.
 migrate-hash:
 	atlas migrate hash --env local
 

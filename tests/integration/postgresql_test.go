@@ -9,17 +9,17 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/harrison542002/go-route/internal/adapters/outbound/sink"
+	"github.com/harrison542002/go-route/internal/adapters/repositories"
 	"github.com/harrison542002/go-route/internal/core/domains"
 )
 
-var _ = Describe("PostgresWriter", func() {
-	var writer *sink.PostgresWriter
+var _ = Describe("RecordWriter", func() {
+	var writer *repositories.RecordWriter
 
 	BeforeEach(func() {
 		truncate()
 
-		writer = sink.NewPostgresWriter(pool)
+		writer = repositories.NewRecordWriter(pool)
 	})
 
 	write := func(batch ...domains.RoutingDecision) error {
@@ -34,8 +34,8 @@ var _ = Describe("PostgresWriter", func() {
 				SELECT count(*) FROM information_schema.tables
 				WHERE table_schema = 'public'
 				  AND table_name IN ('tenants', 'api_keys', 'quotas', 'usage_counters',
-				                     'usage_ledger', 'audit_log', 'idempotency_keys')`),
-			).To(Equal(7))
+				                     'usage_ledger', 'audit_log')`),
+			).To(Equal(6))
 		})
 
 		It("has dropped the decisions table it replaced", func() {
@@ -76,8 +76,8 @@ var _ = Describe("PostgresWriter", func() {
 				JOIN pg_namespace n ON n.oid = c.relnamespace
 				WHERE n.nspname = 'public'
 				  AND c.relname IN ('tenants', 'api_keys', 'quotas', 'usage_counters',
-				                    'usage_ledger', 'audit_log', 'idempotency_keys')
-				  AND obj_description(c.oid, 'pg_class') IS NOT NULL`)).To(Equal(7),
+				                    'usage_ledger', 'audit_log')
+				  AND obj_description(c.oid, 'pg_class') IS NOT NULL`)).To(Equal(6),
 				"COMMENT ON puts the rationale where psql and tooling can see it")
 
 			Expect(countRows(`

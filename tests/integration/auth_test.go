@@ -9,16 +9,16 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/harrison542002/go-route/internal/adapters/outbound/store/postgresql"
+	"github.com/harrison542002/go-route/internal/adapters/repositories"
 	"github.com/harrison542002/go-route/internal/ports"
 )
 
 var _ = Describe("Auth", func() {
-	var auth *postgresql.Auth
+	var auth *repositories.Auth
 
 	BeforeEach(func() {
 		truncate()
-		auth = postgresql.NewAuth(pool)
+		auth = repositories.NewAuth(pool)
 	})
 
 	authenticate := func(key string) (ports.Identity, error) {
