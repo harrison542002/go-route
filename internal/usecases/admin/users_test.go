@@ -33,6 +33,11 @@ type userStore struct {
 	// reading the stored hash first, so a login that never reads one
 	// never derived anything either.
 	logins int
+
+	// beforeRotate runs once, inside RotateAdminSession and before it takes
+	// the lock, so a test can land a competing rotation in the window
+	// between reading a session and rotating it.
+	beforeRotate func()
 }
 
 var _ ports.AdminUserRepository = (*userStore)(nil)
@@ -167,6 +172,12 @@ func (s *userStore) AdminSessionByTokenHash(_ context.Context, hash []byte) (por
 }
 
 func (s *userStore) RotateAdminSession(_ context.Context, presented uuid.UUID, n ports.NewAdminSession) error {
+	if s.beforeRotate != nil {
+		hook := s.beforeRotate
+		s.beforeRotate = nil
+		hook()
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -506,6 +517,42 @@ func TestReplayingARefreshTokenRevokesTheWholeSet(t *testing.T) {
 
 	if store.detailFor("user.refresh_reuse") == "" {
 		t.Error("no user.refresh_reuse row")
+	}
+}
+
+// Losing the rotation race means someone else presented the same live token
+// first, which is the evidence of theft the replay check exists for: the
+// winner's freshly minted token has to die with the rest.
+func TestLosingTheRotationRaceRevokesTheWholeSet(t *testing.T) {
+	users, store := newTestUsers(t)
+	user := create(t, users, "ops@example.com", domains.RoleAdmin)
+
+	first, err := users.Login(context.Background(),
+		ports.Credentials{Email: user.Email, Password: testPassword})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var winner ports.AdminSessionTokens
+	store.beforeRotate = func() {
+		winner, err = users.Refresh(context.Background(), first.RefreshToken)
+		if err != nil {
+			t.Errorf("the winning refresh failed: %v", err)
+		}
+	}
+
+	if _, err := users.Refresh(context.Background(), first.RefreshToken); !errors.Is(err, ports.ErrUnauthenticated) {
+		t.Fatalf("the losing refresh = %v, want ErrUnauthenticated", err)
+	}
+
+	if store.liveSessions(user.ID) != 0 {
+		t.Errorf("live sessions = %d, want 0; the winner's token outlived the race", store.liveSessions(user.ID))
+	}
+	if store.detailFor("user.refresh_reuse") == "" {
+		t.Error("no user.refresh_reuse row")
+	}
+	if _, err := users.Refresh(context.Background(), winner.RefreshToken); !errors.Is(err, ports.ErrUnauthenticated) {
+		t.Errorf("the winner's token still refreshes: %v", err)
 	}
 }
 

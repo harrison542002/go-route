@@ -35,6 +35,14 @@ type AdminUser struct {
 
 func (u AdminUser) Disabled() bool { return u.DisabledAt != nil }
 
+// TokenIssuedAfterPasswordChange reports whether an access token minted at
+// issued still speaks for this person. Changing a password ends every
+// session, and a stateless access token would otherwise outlive that
+// promise by its whole TTL.
+func (u AdminUser) TokenIssuedAfterPasswordChange(issued time.Time) bool {
+	return !issued.Truncate(time.Second).Before(u.PasswordChangedAt.Truncate(time.Second))
+}
+
 // Actor is the string written to audit_log.actor for every mutation this
 // person makes. The prefix is what tells a reader which kind of identity
 // acted: user: for a person, admin: for a machine credential.

@@ -248,6 +248,7 @@ func (u *Users) Refresh(ctx context.Context, refreshToken string) (ports.AdminSe
 
 	if err := u.repo.RotateAdminSession(ctx, session.Token.ID, next); err != nil {
 		if errors.Is(err, ports.ErrConflict) {
+			u.auditSessionReuse(ctx, session, now)
 			return ports.AdminSessionTokens{}, ports.ErrUnauthenticated
 		}
 		return ports.AdminSessionTokens{}, err
