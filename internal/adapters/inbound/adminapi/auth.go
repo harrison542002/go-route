@@ -97,6 +97,8 @@ func authenticateUser(
 		return identity{}, false
 	case user.Disabled():
 		return identity{}, false
+	case !user.TokenIssuedAfterPasswordChange(claims.Issued):
+		return identity{}, false
 	}
 	return userIdentity(user), true
 }

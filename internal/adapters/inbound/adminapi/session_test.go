@@ -140,6 +140,35 @@ func TestRoleComesFromTheRowNotTheToken(t *testing.T) {
 	}
 }
 
+// Changing a password ends every session, and an access token minted before
+// the change must go with them rather than outliving the promise by its TTL.
+func TestTokenIssuedBeforeAPasswordChangeIsRefused(t *testing.T) {
+	issuer := testIssuer(t)
+	token := accessTokenFor(t, issuer, testUser)
+
+	reset := testUser
+	reset.PasswordChangedAt = time.Now().Add(time.Minute)
+
+	rec := whoami(t, newUsers(reset), "Bearer "+token)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code = %d, body = %s; a token from before the reset survived it", rec.Code, rec.Body)
+	}
+}
+
+// The token a person is issued by the login that follows their own password
+// change has to work, and JWT issued-at carries only whole seconds.
+func TestTokenIssuedInTheSameSecondAsAPasswordChangeIsAccepted(t *testing.T) {
+	issuer := testIssuer(t)
+	token := accessTokenFor(t, issuer, testUser)
+
+	reset := testUser
+	reset.PasswordChangedAt = time.Now().Truncate(time.Second).Add(400 * time.Millisecond)
+
+	if rec := whoami(t, newUsers(reset), "Bearer "+token); rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, body = %s", rec.Code, rec.Body)
+	}
+}
+
 func TestReadonlyPersonMayNotWrite(t *testing.T) {
 	readonly := testUser
 	readonly.Role = domains.RoleReadonly
