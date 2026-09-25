@@ -17,13 +17,11 @@ DELETE FROM quotas WHERE tenant_id = $1 AND window_kind = $2;
 -- name: UpsertQuota :one
 INSERT INTO quotas (
     tenant_id, window_kind, period_start, period_end,
-    max_requests, max_tokens, max_cost_nanos, on_exceed, updated_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+    max_cost_nanos, on_exceed, updated_at
+) VALUES ($1, $2, $3, $4, $5, $6, now())
 ON CONFLICT (tenant_id, window_kind) DO UPDATE SET
     period_start   = EXCLUDED.period_start,
     period_end     = EXCLUDED.period_end,
-    max_requests   = EXCLUDED.max_requests,
-    max_tokens     = EXCLUDED.max_tokens,
     max_cost_nanos = EXCLUDED.max_cost_nanos,
     on_exceed      = EXCLUDED.on_exceed,
     updated_at     = now()
@@ -38,8 +36,6 @@ SELECT
     q.window_kind,
     q.period_start,
     q.period_end,
-    q.max_requests,
-    q.max_tokens,
     q.max_cost_nanos,
     q.on_exceed,
     COALESCE(c.requests, 0)::bigint   AS used_requests,

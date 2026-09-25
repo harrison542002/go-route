@@ -9,9 +9,6 @@ import (
 	"github.com/harrison542002/go-route/schemas/admin/gen"
 )
 
-// The wire types are generated from schemas/admin/openapi.yaml; these functions
-// are the only place they meet the domain's.
-
 func toTenant(t domains.TenantAccount) gen.Tenant {
 	meta := json.RawMessage(t.Metadata)
 	if len(meta) == 0 {
@@ -39,8 +36,6 @@ func toKey(k domains.APIKey) gen.APIKey {
 	}
 }
 
-// toIssuedKey renders the one response the plaintext secret ever appears in;
-// nothing stores it.
 func toIssuedKey(k domains.APIKey, secret string) gen.IssuedAPIKey {
 	key := toKey(k)
 	return gen.IssuedAPIKey{
@@ -55,7 +50,6 @@ func toIssuedKey(k domains.APIKey, secret string) gen.IssuedAPIKey {
 	}
 }
 
-// toAllowlist renders nil as null (every alias) and empty as [] (none).
 func toAllowlist(list []string) nullable.Nullable[gen.ModelAllowlist] {
 	if list == nil {
 		return nullable.NewNullNullable[gen.ModelAllowlist]()
@@ -63,8 +57,6 @@ func toAllowlist(list []string) nullable.Nullable[gen.ModelAllowlist] {
 	return nullable.NewNullableWithValue(list)
 }
 
-// fromAllowlist maps absent and null to nil (every alias), and an array, empty
-// included, to exactly that array.
 func fromAllowlist(n nullable.Nullable[gen.ModelAllowlist]) []string {
 	if !n.IsSpecified() || n.IsNull() {
 		return nil
@@ -77,20 +69,14 @@ func fromAllowlist(n nullable.Nullable[gen.ModelAllowlist]) []string {
 }
 
 func toQuota(q domains.Quota) gen.Quota {
-	out := gen.Quota{
+	return gen.Quota{
 		WindowKind:   gen.WindowKind(q.WindowKind),
 		PeriodStart:  nullableOf(q.PeriodStart),
 		PeriodEnd:    nullableOf(q.PeriodEnd),
-		MaxRequests:  nullableOf(q.MaxRequests),
-		MaxTokens:    nullableOf(q.MaxTokens),
-		MaxCostNanos: nullable.NewNullNullable[int64](),
+		MaxCostNanos: int64(q.MaxCost),
 		OnExceed:     gen.QuotaAction(q.OnExceed),
 		UpdatedAt:    q.UpdatedAt,
 	}
-	if q.MaxCost != nil {
-		out.MaxCostNanos = nullable.NewNullableWithValue(int64(*q.MaxCost))
-	}
-	return out
 }
 
 func toQuotas(set []domains.Quota) gen.QuotaList {
@@ -101,13 +87,11 @@ func toQuotas(set []domains.Quota) gen.QuotaList {
 	return out
 }
 
-// fromQuota maps one quota as sent; absent and null limits are both unlimited.
 func fromQuota(in gen.QuotaInput) domains.Quota {
 	out := domains.Quota{
 		PeriodStart: pointerOf(in.PeriodStart),
 		PeriodEnd:   pointerOf(in.PeriodEnd),
-		MaxRequests: pointerOf(in.MaxRequests),
-		MaxTokens:   pointerOf(in.MaxTokens),
+		MaxCost:     domains.USD(in.MaxCostNanos),
 	}
 	if in.WindowKind != nil {
 		out.WindowKind = domains.WindowKind(*in.WindowKind)
@@ -115,15 +99,9 @@ func fromQuota(in gen.QuotaInput) domains.Quota {
 	if in.OnExceed != nil {
 		out.OnExceed = domains.QuotaAction(*in.OnExceed)
 	}
-	if c := pointerOf(in.MaxCostNanos); c != nil {
-		cost := domains.USD(*c)
-		out.MaxCost = &cost
-	}
 	return out
 }
 
-// nullableOf renders a nil pointer as an explicit JSON null. Left unspecified,
-// nullable.Nullable marshals as T's zero value -- 0 where "unlimited" was meant.
 func nullableOf[T any](p *T) nullable.Nullable[T] {
 	if p == nil {
 		return nullable.NewNullNullable[T]()

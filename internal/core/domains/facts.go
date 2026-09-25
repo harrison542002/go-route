@@ -17,10 +17,17 @@ type RequestFacts struct {
 	KeyID uuid.UUID
 
 	Metadata       map[string]string
-	RequestedModel string // the "model" field as the client sent it
+	RequestedModel string
 	Stream         bool
 	WantsUsage     bool
 	ReceivedAt     time.Time
+
+	// PromptSize, MaxOutputTokens and Choices are what a quota reservation is
+	// estimated from. MaxOutputTokens is zero when the client set no ceiling;
+	// Choices is the n parameter, zero when unset.
+	PromptSize      PromptSize
+	MaxOutputTokens int
+	Choices         int
 }
 
 // Tenant identifies the billing/policy scope.

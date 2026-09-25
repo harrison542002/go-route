@@ -6,6 +6,25 @@ sink:
   batch_size: 100
   flush_interval: 1s
 
+# Live quota counters. A quota is a spend cap, so enforcement also needs
+# the pricing table below: without prices nothing can be costed and
+# startup says so at error level. Leave redis out entirely and quotas are
+# NOT enforced (startup logs a warning); the quota rows in Postgres are
+# then ignored.
+redis:
+  addr: localhost:6379
+  password: ""
+  db: 0
+  timeout: 100ms          # per call; an outage costs a request this long
+  on_unavailable: open    # open: serve unenforced; closed: 503
+
+quota:
+  default_max_output_tokens: 4096  # sizes a request that sets no max_tokens
+  limits_ttl: 10s                  # how long a changed cap takes to bite
+  flush_interval: 1s               # counter deltas to Postgres
+  flush_buffer: 8192               # deltas held before dropping
+  resync_interval: 60s             # raise live counters back to Postgres
+
 providers:
   broken:
     type: oaicompat

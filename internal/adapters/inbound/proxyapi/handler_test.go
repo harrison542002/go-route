@@ -145,14 +145,14 @@ var testNowFn = func() time.Time {
 
 func newHandler(r Router, res Resolver) (http.Handler, *recordingSink) {
 	s := &recordingSink{}
-	return mounted(NewHandler(r, res, dispatch.New(testNowFn), s, testNowFn),
+	return mounted(NewHandler(r, res, dispatch.New(testNowFn), s, nil, testNowFn),
 		stubAuth{tenant: "acme"}), s
 }
 
 // authedHandler is newHandler with a chosen authenticator.
 func authedHandler(t *testing.T, r Router, res Resolver, auth ports.Authenticator) http.Handler {
 	t.Helper()
-	return mounted(NewHandler(r, res, dispatch.New(testNowFn), &recordingSink{}, testNowFn), auth)
+	return mounted(NewHandler(r, res, dispatch.New(testNowFn), &recordingSink{}, nil, testNowFn), auth)
 }
 
 // mounted wraps the handler the way NewServer does, so a spec that posts
@@ -713,7 +713,7 @@ func TestCompletions_RejectedKeyRecordsNothing(t *testing.T) {
 	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5")}, nil)
 
 	s := &recordingSink{}
-	h := mounted(NewHandler(r, res, dispatch.New(testNowFn), s, testNowFn),
+	h := mounted(NewHandler(r, res, dispatch.New(testNowFn), s, nil, testNowFn),
 		stubAuth{err: ports.ErrUnknownKey})
 
 	if resp := post(t, h, `{"model":"fast","messages":[]}`, nil); resp.StatusCode != http.StatusUnauthorized {
@@ -733,7 +733,7 @@ func TestCompletions_RecordsTheKeyThatAuthorised(t *testing.T) {
 
 	keyID := uuid.New()
 	s := &recordingSink{}
-	h := mounted(NewHandler(r, res, dispatch.New(testNowFn), s, testNowFn),
+	h := mounted(NewHandler(r, res, dispatch.New(testNowFn), s, nil, testNowFn),
 		stubAuth{tenant: "acme", keyID: keyID})
 
 	if resp := post(t, h, `{"model":"fast","messages":[]}`, nil); resp.StatusCode != http.StatusOK {
@@ -784,7 +784,7 @@ func TestCompletions_UnwrappedRouteFailsClosed(t *testing.T) {
 	p := unusedProvider(ctrl, "openai")
 	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5")}, nil)
 
-	bare := NewHandler(r, res, dispatch.New(testNowFn), &recordingSink{}, testNowFn)
+	bare := NewHandler(r, res, dispatch.New(testNowFn), &recordingSink{}, nil, testNowFn)
 
 	resp := post(t, http.HandlerFunc(bare.Completions), `{"model":"fast","messages":[]}`, nil)
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -800,7 +800,7 @@ func TestServer_HealthzNeedsNoCredential(t *testing.T) {
 	p := unusedProvider(ctrl, "openai")
 	r, res, _ := routing(ctrl, []ports.Target{target(p, "openai", "gpt-5")}, nil)
 
-	h := NewHandler(r, res, dispatch.New(testNowFn), &recordingSink{}, testNowFn)
+	h := NewHandler(r, res, dispatch.New(testNowFn), &recordingSink{}, nil, testNowFn)
 	srv := httptest.NewServer(NewServer("", h, stubAuth{err: ports.ErrUnknownKey}).Handler)
 	t.Cleanup(srv.Close)
 

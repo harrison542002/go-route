@@ -174,7 +174,7 @@ const (
 	QuotaAllow QuotaAction = "allow"
 )
 
-// Quota is one limit on one window for one tenant.
+// Quota is one spend cap on one window for one tenant.
 type Quota struct {
 	WindowKind WindowKind
 
@@ -182,11 +182,9 @@ type Quota struct {
 	PeriodStart *time.Time
 	PeriodEnd   *time.Time
 
-	// Each limit is optional, but at least one must be set. Nil means that
-	// dimension is unlimited, which is a different fact from zero.
-	MaxRequests *int64
-	MaxTokens   *int64
-	MaxCost     *USD
+	// MaxCost is what may be spent in the window. Zero is a real cap that
+	// allows nothing, not an absent one.
+	MaxCost USD
 
 	OnExceed  QuotaAction
 	UpdatedAt time.Time
@@ -215,12 +213,8 @@ func (q Quota) Validate() error {
 			ErrInvalidQuota, q.WindowKind)
 	}
 
-	if q.MaxRequests == nil && q.MaxTokens == nil && q.MaxCost == nil {
-		return fmt.Errorf("%w: %s quota sets no limit; set at least one of max_requests, max_tokens, max_cost_nanos",
-			ErrInvalidQuota, q.WindowKind)
-	}
-	if negative(q.MaxRequests) || negative(q.MaxTokens) || (q.MaxCost != nil && *q.MaxCost < 0) {
-		return fmt.Errorf("%w: %s quota limits must not be negative", ErrInvalidQuota, q.WindowKind)
+	if q.MaxCost < 0 {
+		return fmt.Errorf("%w: %s quota max_cost_nanos must not be negative", ErrInvalidQuota, q.WindowKind)
 	}
 
 	switch q.OnExceed {
@@ -238,23 +232,12 @@ func (q Quota) SameLimits(o Quota) bool {
 		q.OnExceed == o.OnExceed &&
 		sameTime(q.PeriodStart, o.PeriodStart) &&
 		sameTime(q.PeriodEnd, o.PeriodEnd) &&
-		samePtr(q.MaxRequests, o.MaxRequests) &&
-		samePtr(q.MaxTokens, o.MaxTokens) &&
-		samePtr(q.MaxCost, o.MaxCost)
+		q.MaxCost == o.MaxCost
 }
-
-func negative(p *int64) bool { return p != nil && *p < 0 }
 
 func sameTime(a, b *time.Time) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
 	return a.Equal(*b)
-}
-
-func samePtr[T comparable](a, b *T) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
 }

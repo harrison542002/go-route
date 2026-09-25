@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/harrison542002/go-route/internal/core/domains"
 	"github.com/harrison542002/go-route/internal/ports"
@@ -95,4 +98,33 @@ func unauthorized(w http.ResponseWriter, message string) {
 	// RFC 9110: a 401 has to say what scheme would satisfy it.
 	w.Header().Set("WWW-Authenticate", "Bearer")
 	writeError(w, http.StatusUnauthorized, message, "authentication_error")
+}
+
+// sdkRetryHorizon is roughly how long the OpenAI SDKs will honour a Retry-After
+// before falling back to their own backoff.
+const sdkRetryHorizon = time.Minute
+
+// writeQuotaExceeded answers a request refused by the tenant's own quota.
+//
+// This one IS a 429, unlike an upstream rate limit (see statusFor): it is the
+// caller's budget, which is exactly what 429 means.
+func writeQuotaExceeded(w http.ResponseWriter, id domains.DecisionID, b domains.QuotaBreach, now time.Time) {
+	retryAfter := max(1, int64(math.Ceil(b.ResetAt().Sub(now).Seconds())))
+
+	h := w.Header()
+	h.Set("Retry-After", strconv.FormatInt(retryAfter, 10))
+	h.Set("X-Should-Retry", strconv.FormatBool(time.Duration(retryAfter)*time.Second <= sdkRetryHorizon))
+
+	// The refusal is recorded, so the ID lets `go-route explain` find it.
+	h.Set("X-Go-Route-Decision-Id", id.String())
+
+	code := "quota_exceeded"
+	h.Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+
+	_ = json.NewEncoder(w).Encode(errorEnvelope{Error: errorBody{
+		Message: "quota exceeded: " + b.String(),
+		Type:    "quota_exceeded",
+		Code:    &code,
+	}})
 }

@@ -4,65 +4,8 @@ info:
   title: go-route admin API
   version: 1.0.0
   description: |
-    The internal admin API: tenants, their API keys and their quotas. It
-    is the only way any of them are created. go-route provisions nothing
-    implicitly, and the customer's billing system, not go-route, decides
-    what each tenant is allowed.
-
-    This document is the contract. The Go request and response types in
-    schemas/admin/gen are generated from it, and
-    every request under /admin/ is validated against it before a handler
-    runs, so an unknown field, a bad enum or a malformed UUID is refused
-    here with a 400 rather than reaching the use case.
-
-    The API is served on its own listener, not as a path on the proxy, so
-    it can be bound to loopback or a private interface and never be
-    reachable from where tenants are.
-
-    Bodies are JSON and nothing else. A request body is parsed as JSON
-    whatever its Content-Type says, so `curl -d` works without a header.
-
-    Writes are safe to repeat because of how the data is shaped, not
-    because of a replay layer. `external_id` is unique, so a retried
-    tenant creation returns the tenant the first attempt made; disabling,
-    enabling and revoking are timestamps, so doing one again is a no-op;
-    an update is last-writer-wins, so resending the same body leaves the
-    same state. A write that fails or times out is rolled back whole, so
-    it changed nothing and can simply be sent again. The exception is
-    minting a key: every call makes a new secret, so a repeat mints a
-    second key, by design -- keys belong to a tenant many at a time, and
-    an extra one is listed and revocable like the rest.
-
-    Every caller holds its own bearer token, minted by
-    `go-route-admin create-token`. The token identifies the credential it
-    belongs to, and that credential's name is what writes are recorded
-    under in the audit log, as `admin:<name>`. There is no shared token
-    and no header naming the caller: identity comes from the credential.
-
-    A credential also carries a role and, optionally, an expiry. An
-    `admin` credential may do everything; a `readonly` one may only read,
-    and any other method is a 403. See the `adminToken` security scheme.
-
-    Every request has a deadline (`admin.request_timeout`, 10s by
-    default). Work that outlives it is abandoned, its transaction rolled
-    back, and the caller gets a 504.
-
-    Three endpoints answer questions rather than change anything:
-    usage, one request's routing story, and the audit log. They exist
-    because a dashboard has to show what a deployment is doing, and
-    until now the only way to ask was the `go-route` CLI against the
-    database. They are all GETs, so a `readonly` credential reaches all
-    of them and nothing else -- which is exactly what a dashboard's
-    viewers should hold.
-
-    Two kinds of caller reach this API and both arrive as a bearer
-    token. A machine -- a billing sync job, CI -- presents the long-lived
-    token `go-route-admin create-token` minted for it. A person logs in
-    at `/admin/v1/auth/login` with an email and a password and presents
-    the short-lived JWT they get back. Past authentication the two are
-    the same thing: an actor string for the audit log and a role, and no
-    endpoint, permission check or audit row asks which kind it was.
-
+    Tenants, their API keys and their quotas. This document is the contract: schemas/admin/gen is
+    generated from it and every request under /admin/ is validated against it. See docs/admin-api.md.
 tags:
   - name: auth
   - name: tenants
@@ -80,10 +23,7 @@ paths:
       operationId: healthz
       tags: [health]
       summary: Liveness probe
-      description: |
-        Answers 200 without a token, so an orchestrator can probe the
-        admin listener without holding a credential. It is served
-        outside the validated /admin/ tree and has no generated handler.
+      description: Served outside the validated /admin/ tree and needs no token.
       security: []
       responses:
         "200":
@@ -94,21 +34,7 @@ paths:
       operationId: login
       tags: [auth]
       summary: Exchange an email and a password for a session
-      description: |
-        The only endpoint under /admin/ that takes no token, along with
-        `refresh`: a person cannot present a credential they have not
-        been given yet. It is still validated against this document and
-        still runs under the request deadline.
-
-        An unknown email, a wrong password, a disabled account and too
-        many recent failures from the same address all return the same
-        401, and all take comparable time: an early answer for an email
-        nobody holds would turn this into a list of who does.
-
-        The access token is a JWT, good for `--access-token-ttl` (15
-        minutes by default). The refresh token is opaque and stored, and
-        the client is what renews with it -- the server never extends a
-        session it was not asked to extend.
+      description: No token needed. Unknown email, wrong password, disabled account and rate limiting share one 401.
       security: []
       requestBody:
         required: true
@@ -118,10 +44,7 @@ paths:
               $ref: "#/components/schemas/LoginRequest"
       responses:
         "200":
-          description: |
-            The session. Both tokens are plaintext here and in no other
-            response: neither is stored in a form that could be shown
-            again.
+          description: The session. Both tokens are plaintext here and nowhere else.
           content:
             application/json:
               schema:
@@ -143,20 +66,8 @@ paths:
       tags: [auth]
       summary: Rotate a refresh token into a new session
       description: |
-        Takes no access token: this is what a client calls precisely
-        because the one it had has expired.
-
-        The presented refresh token is revoked and a new one issued, so
-        a token that travels further than the client it was issued to
-        stops working as soon as the real client next refreshes.
-        Presenting one that has already been revoked means two clients
-        hold it: the person's whole set is cut, `user.refresh_reuse` is
-        audited, and everyone logs in again.
-
-        A refresh token that is unknown, expired, revoked or belongs to
-        a disabled person is refused with the same 401. A client that
-        cannot refresh has one thing to do either way, which is to send
-        its user back to the login form.
+        No access token needed. The presented token is revoked and replaced. Replaying a rotated one cuts
+        the person's whole set and audits `user.refresh_reuse`.
       security: []
       requestBody:
         required: true
@@ -187,17 +98,7 @@ paths:
       operationId: logout
       tags: [auth]
       summary: Revoke a refresh token
-      description: |
-        Ends one session: the presented refresh token is revoked and the
-        access token issued alongside it stops being renewable. An
-        unknown or already revoked token answers 204 like any other,
-        because the caller asked for it to stop working and it has, and
-        a different answer would say which tokens exist.
-
-        It needs an access token, since it is the caller ending their own
-        session. It is the one change a `readonly` caller may make: the
-        permission check is about what the API holds, and a session is
-        the caller's own.
+      description: Needs an access token; the one change a `readonly` caller may make. An unknown token answers 204 too.
       requestBody:
         required: true
         content:
@@ -223,17 +124,7 @@ paths:
       operationId: whoami
       tags: [auth]
       summary: Who this token authenticates as
-      description: |
-        Answers for either kind of caller, because everything after
-        authentication already does. A person gets `kind: user`, their
-        audit actor, their role and their account; a machine credential
-        gets `kind: machine`, its actor and its role, and no `user` --
-        there is no account behind it, only a named token.
-
-        A dashboard calls this once after logging in, to decide which
-        controls to draw. It is not an authorisation check: the role it
-        returns is read from the same row every request is authorised
-        against, and a change to that row shows up here on the next call.
+      description: Answers for either kind of caller. It reports the role, it does not grant it.
       responses:
         "200":
           description: The authenticated caller.
@@ -254,11 +145,8 @@ paths:
       tags: [tenants]
       summary: Create a tenant
       description: |
-        Safe to repeat: external_id is unique, so a create with the same
-        name and metadata returns the existing tenant with 200 instead of
-        201. Only a different name or metadata for a
-        taken external_id is a 409. Metadata is compared by meaning, not
-        by bytes, since Postgres re-serialises jsonb.
+        external_id is unique: the same body again returns the existing tenant with 200, not 201. A different
+        name or metadata for a taken external_id is a 409. Metadata is compared by meaning, not by bytes.
       requestBody:
         required: true
         content:
@@ -273,7 +161,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Tenant"
         "200":
-          description: A tenant with this external_id, name and metadata already existed; it is returned unchanged.
+          description: A tenant with this external_id, name and metadata already existed.
           content:
             application/json:
               schema:
@@ -356,10 +244,7 @@ paths:
       operationId: updateTenant
       tags: [tenants]
       summary: Change a tenant's name and/or metadata
-      description: |
-        Only the fields present change. external_id cannot be changed: it
-        is the join key into the customer's own records. Setting the
-        values a tenant already has is a no-op and writes no audit row.
+      description: Only the fields present change. external_id is not patchable; setting the same values is a no-op.
       requestBody:
         required: true
         content:
@@ -392,11 +277,7 @@ paths:
       operationId: disableTenant
       tags: [tenants]
       summary: Disable a tenant
-      description: |
-        DELETE disables; it never removes. Ledger rows refer to the tenant
-        and its history has to stay readable. Its keys stop authenticating
-        (403 at the proxy). Disabling a disabled tenant is a no-op that
-        returns it unchanged.
+      description: Disables the tenant; tenants are never deleted. Its keys stop authenticating. Repeating is a no-op.
       responses:
         "200":
           description: The tenant, now disabled.
@@ -457,15 +338,8 @@ paths:
       tags: [keys]
       summary: Mint an API key
       description: |
-        The one write a repeat does not leave alone: every call makes a
-        new secret, so sending this twice mints two keys. That is the
-        intended shape -- a tenant holds as many keys as it needs, and
-        the extra one is listed by GET on this path and revoked like any
-        other. A caller that cannot tell whether its first attempt landed
-        lists the tenant's keys and revokes what it did not mean to make.
-
-        The body is optional; without one the key may request every
-        alias. A disabled tenant cannot be issued keys (409).
+        Every call mints a new secret, so a retry mints a second key by design; list the tenant's keys and
+        revoke the extra. The body is optional. A disabled tenant cannot be issued keys (409).
       requestBody:
         required: false
         content:
@@ -474,9 +348,7 @@ paths:
               $ref: "#/components/schemas/NewAPIKey"
       responses:
         "201":
-          description: |
-            The key, with `secret` holding the plaintext. This is the
-            only response it ever appears in.
+          description: The key, with `secret` holding the plaintext. The only response it appears in.
           content:
             application/json:
               schema:
@@ -549,10 +421,7 @@ paths:
       operationId: updateAPIKey
       tags: [keys]
       summary: Replace a key's model allowlist
-      description: |
-        A revoked key keeps the allowlist it was revoked with, which is
-        what its old ledger rows were admitted under, so changing one is a
-        409. Setting the allowlist it already has is a no-op.
+      description: Changing a revoked key's allowlist is a 409. Setting the allowlist it already has is a no-op.
       requestBody:
         required: true
         content:
@@ -588,9 +457,8 @@ paths:
       tags: [keys]
       summary: Revoke a key
       description: |
-        DELETE revokes; it never removes. The row stays so the key remains
-        attributable in the ledger rows it wrote, and the proxy answers
-        401 for it from then on. Revoking twice is a no-op.
+        Revokes the key; keys are never deleted, so they stay attributable in old ledger rows. The proxy
+        answers 401 for it from then on. Revoking twice is a no-op.
       responses:
         "200":
           description: The key, now revoked.
@@ -643,12 +511,8 @@ paths:
       tags: [quotas]
       summary: Replace the tenant's whole quota set
       description: |
-        The body becomes the tenant's entire quota set, in one
-        transaction. Windows left out are removed, and a failure part way
-        leaves the old set exactly as it was rather than the tenant with
-        no limits at all, which would read as unlimited. Sending the same
-        set again changes nothing and writes no audit row, which is what
-        lets a sync job reassert its desired state on a timer.
+        The body becomes the tenant's entire set, in one transaction: windows left out are removed.
+        Sending the same set again writes no audit row.
       requestBody:
         required: true
         content:
@@ -707,10 +571,7 @@ paths:
       operationId: putQuota
       tags: [quotas]
       summary: Set one window's quota, leaving the others alone
-      description: |
-        The window comes from the path. A body that also names one must
-        name the same window; a different one is refused rather than one
-        of the two being quietly preferred.
+      description: The window comes from the path. A body that names one must name the same window.
       requestBody:
         required: true
         content:
@@ -743,10 +604,7 @@ paths:
       operationId: deleteQuota
       tags: [quotas]
       summary: Remove one window's quota
-      description: |
-        Answers 204 whether or not the quota existed: the caller wants no
-        such limit, and afterwards there is none. Quotas carry no history,
-        so this really deletes.
+      description: Answers 204 whether or not the quota existed. Quotas carry no history, so this really deletes.
       responses:
         "204":
           description: There is no quota for this window.
@@ -773,67 +631,36 @@ paths:
       tags: [observability]
       summary: What did this tenant spend, and on what?
       description: |
-        The question `go-route report` answers, over HTTP: requests,
-        tokens, spend, outcome counts and latency for a period, either
-        as one total or grouped by a dimension.
-
-        The period is half-open, `since` inclusive and `until`
-        exclusive, so consecutive periods neither overlap nor leave a
-        gap and a day's report plus the next day's is exactly the two
-        days'. `since` is required -- a report with no floor would scan
-        every partition the retention policy has kept -- and `until`
-        defaults to now, which is what a dashboard showing "the last
-        30 days" wants.
-
-        Rows come back most expensive first and are capped by `limit`;
-        what did not fit is counted in `truncated_groups` rather than
-        silently dropped, so a caller can tell a short list from a
-        complete one.
-
-        Every amount is in nanodollars. See `cost_nanos`.
+        Requests, tokens, spend, outcomes and latency over a half-open period (`since` inclusive, `until`
+        exclusive), as one total or grouped. Rows come most expensive first. Amounts are in nanodollars.
       parameters:
         - name: since
           in: query
           required: true
-          description: |
-            Start of the period, inclusive. Required: an unbounded
-            report would read every partition still on disk.
+          description: Start of the period, inclusive. Required.
           schema:
             type: string
             format: date-time
         - name: until
           in: query
-          description: |
-            End of the period, exclusive. Defaults to the moment the
-            request is served, so a dashboard asking for "since
-            midnight" does not have to keep a clock in step with the
-            server's.
+          description: End of the period, exclusive. Defaults to now.
           schema:
             type: string
             format: date-time
         - name: group_by
           in: query
-          description: |
-            The dimension to put one row on each value of. `none`, the
-            default, returns a single row for the whole period.
+          description: The dimension to put one row on each value of. `none` is the default.
           schema:
             $ref: "#/components/schemas/UsageGroupBy"
         - name: meta_key
           in: query
-          description: |
-            Which metadata key to group by, required when `group_by` is
-            `metadata` and refused otherwise. Metadata keys are whatever
-            a deployment's clients send in their `x-go-route-*` headers,
-            so this cannot be an enum.
+          description: Which metadata key to group by. Required when `group_by` is `metadata`, refused otherwise.
           schema:
             type: string
             maxLength: 256
         - name: limit
           in: query
-          description: |
-            Maximum rows returned. Absent or 0 means 500. A
-            high-cardinality metadata key would otherwise produce a row
-            per request.
+          description: Maximum rows returned. Absent or 0 means 500.
           schema:
             type: integer
             minimum: 0
@@ -864,30 +691,12 @@ paths:
       tags: [observability]
       summary: A tenant's audit events, newest first
       description: |
-        Everything `audit_log` holds for this tenant: the routed
-        requests the gateway wrote, and the admin mutations written
-        inside the transactions that made them. One list, because
-        "what happened to this tenant on Tuesday" does not know in
-        advance which kind of row it is looking for.
-
-        Paging is by cursor, not by page number. `audit_log` is
-        partitioned and grows without bound, and an offset makes the
-        database walk and discard every row it skips, so the hundredth
-        page costs a hundred times the first. A cursor is a `WHERE`
-        clause that lands on an index instead -- and it is the only
-        form that stays correct while rows are arriving, which they
-        always are: an offset shifts under a new event, repeating one
-        row and skipping another.
-
-        The routing story itself -- the ladder and every attempt -- is
-        not in these events. It belongs to one request at a time, and
-        `GET /admin/v1/requests/{decision_id}` is where to ask for it,
-        using the `request_id` an event carries.
+        Everything `audit_log` holds for this tenant -- routed requests and admin mutations -- in one
+        cursor-paged list. The routing story itself is at `GET /admin/v1/requests/{decision_id}`.
       parameters:
         - name: since
           in: query
           required: true
-          description: Start of the range, inclusive.
           schema:
             type: string
             format: date-time
@@ -900,24 +709,14 @@ paths:
         - name: cursor
           in: query
           description: |
-            `next_cursor` from the previous page. It is opaque: a caller
-            passes back exactly the string it was given and reads
-            nothing into it, because what it encodes is this
-            implementation's ordering key and may change. A cursor that
-            does not decode is a 400 rather than a silent restart from
-            the top, which would loop a paging client forever.
-
-            A cursor is only meaningful with the same `since` and
-            `until` it was issued under; changing the range while paging
-            gives results nobody should rely on.
+            `next_cursor` from the previous page, passed back exactly as given and only with the same range.
+            One that does not decode is a 400.
           schema:
             type: string
             maxLength: 512
         - name: limit
           in: query
-          description: |
-            Maximum events in the page. Absent or 0 means 50, and 500 is
-            the ceiling: these rows carry JSON detail.
+          description: Maximum events in the page. Absent or 0 means 50.
           schema:
             type: integer
             minimum: 0
@@ -948,19 +747,8 @@ paths:
       tags: [observability]
       summary: Why did this request go where it did?
       description: |
-        The question `go-route explain` answers, over HTTP: one
-        decision in full -- what was asked for, which targets were
-        eligible and in what order, which of them were tried and what
-        each one did, what came back and what it cost.
-
-        The ladder and the attempts are the point. A request that
-        succeeded after its first target refused the connection looks
-        identical to one that went straight through, unless something
-        kept both attempts, and this is where they were kept.
-
-        It is not scoped to a tenant. A decision id names exactly one
-        request, the path is reachable only with an admin credential,
-        and the response says which tenant it belonged to.
+        One decision in full: what was asked for, the ladder, every attempt, and what it cost. Not scoped
+        to a tenant; the response says which tenant it belonged to.
       responses:
         "200":
           description: The decision.
@@ -985,52 +773,16 @@ components:
       type: http
       scheme: bearer
       description: |
-        One header, two kinds of credential.
-
-        A person presents the signed access token `/admin/v1/auth/login`
-        gave them. It is verified by signature, issuer and expiry, and
-        the subject it carries is then read from admin_users on every
-        request: the row decides what the caller may do, so disabling a
-        person or demoting them to `readonly` takes effect on their very
-        next call. The role inside the token is for a dashboard deciding
-        which controls to draw, never for authorisation. The token's
-        short life bounds how long a leaked one is usable at all, and a
-        client refreshes at `/admin/v1/auth/refresh` when it expires.
-
-        A machine presents a per-caller token from the admin_credentials
-        table, minted with
-        `go-route-admin create-token --name <name>`. It is looked up by
-        its SHA-256 on every request, so revoking a credential takes
-        effect immediately, and the credential's name is the identity
-        every write it makes is audited under.
-
-        A token that matches no credential, one belonging to a revoked
-        credential and one whose credential has expired all get the same
-        401, which is also what every path under /admin/ returns, known
-        or not, so the API cannot be mapped and a guessed token cannot be
-        confirmed to have once existed or to have worked yesterday.
-
-        A credential carries a role. `admin` may do everything here;
-        `readonly` may only read, so that a dashboard can show spend and
-        audit history to people who must not change a quota. A `readonly`
-        credential making any request that is not a GET or a HEAD is
-        refused with a 403, which -- unlike the 401 -- says plainly why.
-
-        A credential may also have an expiry, set when it is minted with
-        `go-route-admin create-token --expires-in 90d`. It is checked
-        when the token is presented, not swept from the table: the row
-        has to outlive the credential, because the audit rows it wrote
-        name it.
-
+        A machine credential, or a person's access token from /admin/v1/auth/login. Role and identity are
+        read from the row on every request. `admin` may write; `readonly` may only read, and writes are 403.
   parameters:
     TenantRef:
       name: tenant
       in: path
       required: true
       description: |
-        go-route's UUID for the tenant or its external_id, so a caller can
-        address tenants by the ids in its own system. A value that parses
-        as a UUID is tried as go-route's id first, then as an external id.
+        The tenant's go-route UUID or its external_id. A value that parses as a UUID is tried as go-route's
+        id first, then as an external id.
       schema:
         type: string
         minLength: 1
@@ -1039,7 +791,6 @@ components:
       name: key
       in: path
       required: true
-      description: The key's id.
       schema:
         type: string
         format: uuid
@@ -1055,28 +806,21 @@ components:
       name: decision_id
       in: path
       required: true
-      description: |
-        The decision id, as the `X-Go-Route-Decision-Id` response header
-        and every decision log line carry it: `dec_` and a UUID. The
-        bare UUID is accepted too, since that is how the row is stored
-        and how a query against the database hands it back.
+      description: The decision id, `dec_` and a UUID as the response header carries it. The bare UUID is accepted too.
       schema:
         type: string
         minLength: 1
 
   responses:
     BadRequest:
-      description: |
-        The request is malformed or fails validation: invalid JSON, an
-        unknown field, a value of the wrong type or outside its enum, or
-        input the use case refuses (type invalid_request_error).
+      description: Malformed or fails validation (type invalid_request_error).
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     Unauthorized:
       description: |
-        No token, or one belonging to no credential or to a revoked one
+        No token, or one unknown, revoked, expired or disabled -- the answer does not distinguish them
         (type authentication_error).
       headers:
         WWW-Authenticate:
@@ -1088,17 +832,7 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     Forbidden:
-      description: |
-        The credential is `readonly` and the request would change
-        something (type permission_error). Unlike the 401, this answer is
-        specific: the caller is authenticated, so naming its role tells
-        it nothing it could not read off its own credential, and a
-        dashboard can grey out a control instead of guessing.
-
-        Every request under /admin/ is checked, by method: GET and HEAD
-        are allowed to a `readonly` credential and everything else is
-        not, so an endpoint added later is covered without being listed
-        anywhere.
+      description: The credential is `readonly` and the request is not a GET or a HEAD (type permission_error).
       content:
         application/json:
           schema:
@@ -1111,22 +845,16 @@ components:
             $ref: "#/components/schemas/Error"
     DecisionNotFound:
       description: |
-        No decision with this id is held (type not_found_error). That is
-        not the same as "never existed": the ledger and the audit log
-        are partitioned by month and old partitions are dropped, so a
-        request from long enough ago is gone whether or not it happened.
-        The message says so, because a dashboard showing "no such
-        request" for a request that plainly did happen sends somebody
-        hunting a bug that is a retention policy.
+        No decision with this id is held (type not_found_error). It may have aged out with its partition
+        rather than never existed, and the message says so.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     Conflict:
       description: |
-        The change contradicts the current state (type conflict_error):
-        an external_id taken by a different tenant, a key for a disabled
-        tenant, or a change to a revoked key.
+        The change contradicts the current state (type conflict_error): an external_id taken by a different
+        tenant, a key for a disabled tenant, or a change to a revoked key.
       content:
         application/json:
           schema:
@@ -1139,18 +867,14 @@ components:
             $ref: "#/components/schemas/Error"
     Timeout:
       description: |
-        The request outlived `admin.request_timeout` (type timeout_error).
-        Its transaction was rolled back, so nothing changed and a retry is
-        safe.
+        The request outlived `admin.request_timeout` (type timeout_error). Its transaction was rolled
+        back, so a retry is safe.
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     Internal:
-      description: |
-        Something failed inside, almost always the database (type
-        internal_error). The detail is logged, not returned; the caller
-        can do nothing with it but retry.
+      description: Something failed inside, almost always the database (type internal_error).
       content:
         application/json:
           schema:
@@ -1193,14 +917,12 @@ components:
           type: string
           format: email
           maxLength: 254
-          description: Compared lower-cased, so the case it is typed in does not matter.
+          description: Compared lower-cased.
         password:
           type: string
           minLength: 1
           maxLength: 1024
-          description: |
-            Never stored, never logged and never echoed. A failed attempt
-            is audited with the email and the client address only.
+          description: Never stored, never logged and never echoed.
 
     RefreshRequest:
       type: object
@@ -1228,26 +950,16 @@ components:
       properties:
         access_token:
           type: string
-          description: |
-            A signed JWT, presented as `Authorization: Bearer <token>`,
-            exactly as a machine credential's token is. It says who is
-            asking; what they may do is read from their row on every
-            request, so a role change or a disable takes effect on the
-            next one rather than when this token expires.
         token_type:
           type: string
           enum: [Bearer]
         expires_at:
           type: string
           format: date-time
-          description: |
-            When the access token stops verifying. The client refreshes
-            when it has to, not on a schedule the server sets.
+          description: When the access token stops verifying.
         refresh_token:
           type: string
-          description: |
-            Opaque, stored as a SHA-256, and rotated by every refresh.
-            Keep it where a page's scripts cannot read it.
+          description: Opaque, stored as a SHA-256, and rotated by every refresh.
         user:
           $ref: "#/components/schemas/AdminUser"
 
@@ -1271,9 +983,7 @@ components:
           type: string
           format: date-time
           nullable: true
-          description: |
-            When this person was locked out, null for one who is not.
-            Disabled, never deleted: the audit rows they wrote name them.
+          description: When this person was locked out, null for one who is not. People are disabled, never deleted.
         last_login_at:
           type: string
           format: date-time
@@ -1282,9 +992,7 @@ components:
     AdminRole:
       type: string
       description: |
-        What a caller may do, the same two values for a person and for a
-        machine credential. `admin` may read and write; `readonly` may
-        only read, and any other method is a 403.
+        `admin` may read and write; `readonly` may only read, and any other method is a 403.
       enum: [admin, readonly]
 
     Identity:
@@ -1294,9 +1002,7 @@ components:
         actor:
           type: string
           description: |
-            What the audit log records for everything this caller
-            changes: `user:<email>` for a person, `admin:<name>` for a
-            machine credential.
+            The audit identity: `user:<email>` for a person, `admin:<name>` for a machine credential.
         kind:
           type: string
           enum: [user, machine]
@@ -1309,11 +1015,8 @@ components:
       type: object
       additionalProperties: true
       description: |
-        An opaque JSON object the customer attaches for their own
-        reconciliation. go-route stores it and never reads it. It is kept
-        as raw JSON end to end so large numbers keep their precision, and
-        compared by meaning rather than bytes, since Postgres reorders
-        keys and rewrites numbers.
+        An opaque JSON object the customer attaches; go-route stores it and never reads it. Compared by
+        meaning, not by bytes.
       x-go-type: json.RawMessage
 
     Tenant:
@@ -1325,9 +1028,7 @@ components:
           format: uuid
         external_id:
           type: string
-          description: |
-            The tenant's id in the customer's own system, and the string
-            every routed request is attributed to. It never changes.
+          description: The tenant's id in the customer's own system. It never changes.
         name:
           type: string
         metadata:
@@ -1349,10 +1050,7 @@ components:
         external_id:
           type: string
           description: |
-            Unique, so a retrying signup flow cannot make two tenants. At
-            most 256 bytes of UTF-8, and no leading or trailing
-            whitespace: it has to match the customer's system byte for
-            byte, so it is rejected rather than trimmed.
+            Unique. At most 256 bytes of UTF-8, with no surrounding whitespace: rejected rather than trimmed.
         name:
           type: string
           description: Not blank, at most 256 characters.
@@ -1362,9 +1060,7 @@ components:
     TenantPatch:
       type: object
       additionalProperties: false
-      description: |
-        Only the fields present change, and at least one must be. There is
-        no external_id here on purpose.
+      description: Only the fields present change, and at least one must be. external_id is not patchable.
       properties:
         name:
           type: string
@@ -1387,17 +1083,11 @@ components:
       items:
         type: string
       description: |
-        The aliases the key may request. null allows every alias and []
-        allows none; the distinction is the whole point of the field.
-        Aliases are not checked against the loaded config, so a tier can
-        be set up before the alias it names is deployed. Blank and
-        duplicate aliases are refused.
-
+        The aliases the key may request: null allows every alias, [] allows none. Aliases are not checked
+        against the loaded config. Blank and duplicate aliases are refused.
     APIKey:
       type: object
-      description: |
-        A credential as the admin API shows it. The secret is not here:
-        only its SHA-256 is ever stored.
+      description: A key as the admin API shows it. The secret is not here; only its SHA-256 is stored.
       required: [id, tenant_id, key_prefix, model_allowlist, created_at, last_used_at, revoked_at]
       properties:
         id:
@@ -1408,10 +1098,7 @@ components:
           format: uuid
         key_prefix:
           type: string
-          description: |
-            The visible head of the key (`gr_live_` and six more
-            characters), for telling a tenant's keys apart. Identification
-            only, never authentication.
+          description: The visible head of the key (`gr_live_` and six more characters). Identification only.
         model_allowlist:
           $ref: "#/components/schemas/ModelAllowlist"
         created_at:
@@ -1428,11 +1115,7 @@ components:
           description: When the key was revoked; null while it is live.
 
     IssuedAPIKey:
-      description: |
-        A key-creation response, and the only place the plaintext ever
-        appears. Nothing writes it down -- only its SHA-256 is stored, so
-        a database leak hands nobody a working key. A caller that lost
-        this response revokes the key and mints another.
+      description: The only place the plaintext ever appears. A caller that lost it revokes the key and mints another.
       allOf:
         - $ref: "#/components/schemas/APIKey"
         - type: object
@@ -1440,9 +1123,7 @@ components:
           properties:
             secret:
               type: string
-              description: |
-                The plaintext key, `gr_live_` plus 52 characters of
-                base32. Shown here once and never again.
+              description: The plaintext key, `gr_live_` plus 52 characters of base32. Returned once and never again.
 
     NewAPIKey:
       type: object
@@ -1455,9 +1136,7 @@ components:
       type: object
       additionalProperties: false
       description: |
-        model_allowlist is required even though null is a valid value:
-        absent, null and [] would otherwise be easy to confuse, and they
-        mean an error, every alias and no alias respectively.
+        Required even though null is valid: absent is an error, null means every alias, [] means none.
       required: [model_allowlist]
       properties:
         model_allowlist:
@@ -1476,21 +1155,16 @@ components:
       type: string
       enum: [minute, hour, day, month, period]
       description: |
-        How a quota window is bounded. `period` carries explicit
-        period_start and period_end, which is what makes anniversary
-        billing work for customers who signed up mid-month.
-
+        `period` carries explicit period_start and period_end, for anniversary billing.
     QuotaAction:
       type: string
       enum: [block, allow]
       description: |
-        What happens when the quota is reached: `block` rejects the
-        request with a 429; `allow` records the overage and keeps serving,
-        which is how a soft limit is expressed.
-
+        `block` rejects the request with a 429; `allow` records the overage and keeps serving.
     Quota:
       type: object
-      required: [window_kind, period_start, period_end, max_requests, max_tokens, max_cost_nanos, on_exceed, updated_at]
+      description: One spend cap. A quota limits money and nothing else.
+      required: [window_kind, period_start, period_end, max_cost_nanos, on_exceed, updated_at]
       properties:
         window_kind:
           $ref: "#/components/schemas/WindowKind"
@@ -1502,19 +1176,10 @@ components:
           type: string
           format: date-time
           nullable: true
-        max_requests:
-          type: integer
-          format: int64
-          nullable: true
-        max_tokens:
-          type: integer
-          format: int64
-          nullable: true
         max_cost_nanos:
           type: integer
           format: int64
-          nullable: true
-          description: Spend in the window, in nanodollars (1e-9 USD).
+          description: What may be spent in the window, in nanodollars (1e-9 USD).
         on_exceed:
           $ref: "#/components/schemas/QuotaAction"
         updated_at:
@@ -1525,12 +1190,9 @@ components:
       type: object
       additionalProperties: false
       description: |
-        One quota as a caller sends it. on_exceed defaults to block when
-        absent. At least one limit must be set and none may be negative;
-        null (or absent) means that dimension is unlimited, which is a
-        different fact from 0. These mirror the
-        table's constraints and are checked first, so a bad request gets
-        a sentence rather than a constraint name.
+        on_exceed defaults to block. max_cost_nanos is required and may not be negative; 0 is a real cap
+        that allows nothing.
+      required: [max_cost_nanos]
       properties:
         window_kind:
           $ref: "#/components/schemas/WindowKind"
@@ -1544,26 +1206,11 @@ components:
           format: date-time
           nullable: true
           description: Required for window_kind period, after period_start.
-        max_requests:
-          type: integer
-          format: int64
-          nullable: true
-          minimum: 0
-          description: Requests in the window.
-        max_tokens:
-          type: integer
-          format: int64
-          nullable: true
-          minimum: 0
-          description: Tokens in the window.
         max_cost_nanos:
           type: integer
           format: int64
-          nullable: true
           minimum: 0
-          description: |
-            Spend in the window, in nanodollars (1e-9 USD): the unit it is
-            stored and summed in, so no rounding happens on the way in.
+          description: What may be spent in the window, in nanodollars (1e-9 USD).
         on_exceed:
           $ref: "#/components/schemas/QuotaAction"
 
@@ -1571,17 +1218,12 @@ components:
       type: object
       additionalProperties: false
       description: |
-        quotas is required, so that a body without it is an error rather
-        than a request to remove every limit. Removing every limit is a
-        legitimate desired state, but it has to be asked for explicitly,
-        as {"quotas": []}.
+        quotas is required: removing every limit has to be asked for explicitly, as {"quotas": []}.
       required: [quotas]
       properties:
         quotas:
           type: array
-          description: |
-            The whole set. Every item needs window_kind, and each window
-            may appear once: the table holds one row per window.
+          description: The whole set. Every item needs window_kind, and each window may appear once.
           items:
             $ref: "#/components/schemas/QuotaInput"
 
@@ -1597,12 +1239,8 @@ components:
     TenantAuditDetail:
       type: object
       description: |
-        What a tenant mutation records in audit_log's detail: the state
-        the change left behind. It is not an API response and no caller
-        ever receives it; it is read a row at a time during an incident.
-        It lives in this document because rows written today are read
-        months later, so the shape history is read back in has to be
-        versioned with the spec rather than drift with the handlers.
+        What a tenant mutation writes to audit_log's detail, not an API response. Versioned here because
+        rows written today are read months later.
       required: [external_id, name, metadata, disabled]
       properties:
         external_id:
@@ -1617,15 +1255,7 @@ components:
 
     APIKeyAuditDetail:
       type: object
-      description: |
-        What a key mutation records in audit_log's detail: the state the
-        change left behind. It is not an API response and no caller ever
-        receives it; it is read a row at a time during an incident. The
-        secret is absent here as it is everywhere else it could have been
-        written down. It lives in this document because rows written
-        today are read months later, so the shape history is read back in
-        has to be versioned with the spec rather than drift with the
-        handlers.
+      description: What a key mutation writes to audit_log's detail, never the secret. Not an API response.
       required: [key_prefix, model_allowlist, revoked]
       properties:
         key_prefix:
@@ -1640,41 +1270,22 @@ components:
     QuotaAuditDetail:
       type: object
       description: |
-        One quota as a quota mutation records it in audit_log's detail:
-        the state the change left behind. A mutation writes the whole set
-        it wrote, as an array of these. It is not an API response and no
-        caller ever receives it; it is read a row at a time during an
-        incident. It lives in this document because rows written today
-        are read months later, so the shape history is read back in has
-        to be versioned with the spec rather than drift with the
-        handlers.
-      required: [window_kind, max_requests, max_tokens, max_cost_nanos, on_exceed]
+        One quota as a mutation writes it to audit_log's detail, the whole set as an array of these.
+        Not an API response.
+      required: [window_kind, max_cost_nanos, on_exceed]
       properties:
         window_kind:
           $ref: "#/components/schemas/WindowKind"
         period_start:
           type: string
           format: date-time
-          description: |
-            Omitted rather than null when the window is not a period, so
-            an incident reader sees at a glance which rows carry one.
+          description: Omitted rather than null when the window is not a period.
         period_end:
           type: string
           format: date-time
-          description: Omitted rather than null when the window is not a period.
-        max_requests:
-          type: integer
-          format: int64
-          nullable: true
-        max_tokens:
-          type: integer
-          format: int64
-          nullable: true
         max_cost_nanos:
           type: integer
           format: int64
-          nullable: true
-          description: Spend in the window, in nanodollars (1e-9 USD).
         on_exceed:
           $ref: "#/components/schemas/QuotaAction"
 
@@ -1682,25 +1293,8 @@ components:
       type: string
       enum: [none, model, target, status, day, metadata]
       description: |
-        What each row of a usage report counts.
-
-        | Value      | One row per                                | Answers |
-        |------------|--------------------------------------------|---------|
-        | `none`     | the whole period                           | what did this cost in total? |
-        | `model`    | the alias the client asked for             | which alias is expensive? |
-        | `target`   | the target that served                     | which provider is carrying traffic? |
-        | `status`   | outcome                                    | how often does routing fail? |
-        | `day`      | UTC calendar day                           | is spend trending up? |
-        | `metadata` | the value of the `meta_key` metadata field | which feature, team or customer spends? |
-
-        Two keys are synthesised rather than read off a row.
-        `(unserved)` is the `target` row for requests where every target
-        in the ladder failed, so nothing served them; `(unset)` is the
-        `metadata` row for requests that carried no value for
-        `meta_key`. They are spelled with parentheses because a target
-        name or a metadata value cannot contain them, so neither can
-        collide with a real value.
-
+        One row per: the whole period (`none`), alias, serving target, outcome, UTC day, or `meta_key`
+        value. `(unserved)` and `(unset)` are synthesised keys for unserved traffic and a missing value.
     TokenCounts:
       type: object
       description: Tokens, summed over everything the group covers.
@@ -1724,18 +1318,11 @@ components:
 
     UsageComparison:
       type: object
-      description: |
-        What this group's traffic would have cost on another target: the
-        same token counts repriced against that target's rates. It is an
-        estimate and nothing more -- a different model produces
-        different output, so the token counts themselves would have
-        differed -- and it is what makes "is this alias worth what it
-        costs" answerable at all.
+      description: What this group's traffic would have cost on another target, the same tokens repriced. An estimate.
       required: [target, cost_nanos, requests]
       properties:
         target:
           type: string
-          description: The target the comparison reprices against.
         cost_nanos:
           type: integer
           format: int64
@@ -1743,19 +1330,9 @@ components:
         requests:
           type: integer
           format: int64
-          description: |
-            How many of the group's requests carried this comparison.
-            Fewer than the group's own `requests` means the comparison
-            is partial and has to be rendered as such: it covers part of
-            the traffic, and reading it as the whole understates the
-            alternative.
-
+          description: How many of the group's requests carried this comparison. Fewer than `requests` means it is partial.
     UsageTotals:
       type: object
-      description: |
-        The figures every usage row carries. The report's `total` is
-        exactly these and no more -- see `UsageRow` for what a grouped
-        row adds, and why the total does not have it.
       required:
         [requests, cost_nanos, unpriced, tokens, comparisons, ok, failed, truncated, disconnected]
       properties:
@@ -1765,30 +1342,16 @@ components:
         cost_nanos:
           type: integer
           format: int64
-          description: |
-            Spend, in nanodollars (1e-9 USD). Nanodollars rather than a
-            decimal string or a float because this is the unit costs are
-            computed, stored and summed in, and rendering them as
-            dollars here would round every figure before a caller could
-            add two of them together. A dashboard divides by 1e9 at the
-            last moment, for display, and never feeds that result back
-            into arithmetic.
+          description: Spend, in nanodollars (1e-9 USD). Divide by 1e9 for display only.
         unpriced:
           type: integer
           format: int64
-          description: |
-            Requests in this group that had no price -- served by a
-            target the price table did not cover -- and are therefore
-            excluded from `cost_nanos`. Worth showing next to the cost:
-            a total that quietly omits a tenth of the traffic is worse
-            than one that says it does.
+          description: Requests the price table did not cover, and so excluded from `cost_nanos`.
         tokens:
           $ref: "#/components/schemas/TokenCounts"
         comparisons:
           type: array
-          description: |
-            One entry per target this group's traffic was repriced
-            against, in no particular order.
+          description: One entry per target this group's traffic was repriced against, in no particular order.
           items:
             $ref: "#/components/schemas/UsageComparison"
         ok:
@@ -1810,22 +1373,8 @@ components:
 
     UsageRow:
       description: |
-        One group of the report: `UsageTotals` plus the two things only
-        a group has, the value it groups on and latency.
-
-        Latency is here and deliberately absent from the report's
-        `total`. A p95 over a group is a percentile of that group's
-        requests, and there is no way to combine several groups'
-        percentiles back into one: a p95 of p95s is not a p95, it needs
-        the underlying distribution, which an aggregate does not keep.
-        Reporting one anyway would be a number that looks right and is
-        not. Ask ungrouped for overall latency, which computes it over
-        every request at once.
-
-        The percentiles cover requests that produced a first token. An
-        exhausted request never produced one and is left out rather than
-        counted as instant, which would make a group's latency improve
-        the more of it failed.
+        `UsageTotals` plus the value the row groups on and latency. Latency is absent from the report's
+        `total`, since percentiles cannot be combined across groups; ask ungrouped for it.
       allOf:
         - $ref: "#/components/schemas/UsageTotals"
         - type: object
@@ -1833,14 +1382,10 @@ components:
           properties:
             key:
               type: string
-              description: |
-                The value this row groups on: the alias, target, status,
-                `YYYY-MM-DD` day or metadata value. Empty when the
-                report is ungrouped, and `(unserved)` or `(unset)` for
-                the synthesised keys described on `UsageGroupBy`.
+              description: The value this row groups on, empty when ungrouped. See `UsageGroupBy` for the synthesised keys.
             p50_ttft_ms:
               type: integer
-              description: Median time to first token, in milliseconds.
+              description: Median time to first token, in milliseconds. Over requests that produced one.
             p95_ttft_ms:
               type: integer
               description: 95th percentile time to first token, in milliseconds.
@@ -1859,7 +1404,6 @@ components:
         since:
           type: string
           format: date-time
-          description: Start of the period, inclusive.
         until:
           type: string
           format: date-time
@@ -1872,21 +1416,13 @@ components:
 
     UsageReport:
       type: object
-      description: |
-        A usage report. `spec` repeats what was asked for, resolved: the
-        tenant's external id, and the period with `until` filled in if
-        the caller left it to the server, so a rendering can label
-        itself without reconstructing the request it made.
       required: [spec, rows, total, truncated_groups]
       properties:
         spec:
           $ref: "#/components/schemas/UsageSpec"
         rows:
           type: array
-          description: |
-            The groups, most expensive first. Empty for a tenant with no
-            traffic in the period; a single row with an empty `key` when
-            the report is ungrouped.
+          description: The groups, most expensive first. A single row with an empty `key` when the report is ungrouped.
           items:
             $ref: "#/components/schemas/UsageRow"
         total:
@@ -1894,24 +1430,12 @@ components:
         truncated_groups:
           type: integer
           format: int64
-          description: |
-            How many groups existed beyond `limit` and are therefore not
-            in `rows`. Zero means the list is complete. They are counted
-            rather than dropped silently, so a caller can tell a whole
-            report from the expensive end of one.
-
-            They are not in `total` either: the total sums the rows that
-            were returned, so it stays consistent with what is shown
-            rather than with something the caller cannot see.
-
+          description: How many groups fell beyond `limit` and are in neither `rows` nor `total`. Zero means complete.
     AuditEvent:
       type: object
       description: |
-        One row of the audit log. Both kinds of row come back through
-        this shape: routed traffic, written by the gateway with actor
-        `gateway` and action `route_request`, and admin mutations,
-        written inside the transaction they describe with actor
-        `admin:<credential name>`.
+        One row of the audit log: routed traffic written by the gateway, or an admin mutation written
+        inside the transaction it describes.
       required: [id, at, actor, action]
       properties:
         id:
@@ -1933,32 +1457,22 @@ components:
         actor:
           type: string
           description: |
-            `gateway` for routed traffic, `admin:<name>` for a mutation
-            made over this API, `cli:<os user>` for one made with the
-            CLI. It is the name of a credential, not a shared label,
-            which is why every caller mints its own.
+            `gateway` for routed traffic, `admin:<name>` or `user:<email>` for a mutation over this API,
+            `cli:<os user>` for one from the CLI.
         action:
           type: string
           description: |
-            `route_request` for routed traffic; otherwise the mutation,
-            such as `tenant.create`, `key.revoke` or `quota.upsert`.
+            `route_request` for routed traffic; otherwise the mutation, such as `tenant.create` or `key.revoke`.
         request_id:
           type: string
           nullable: true
-          description: |
-            The decision id for routed traffic, and what to hand
-            `GET /admin/v1/requests/{decision_id}` for the full routing
-            story. Null for an admin mutation.
+          description: The decision id for routed traffic, to hand `GET /admin/v1/requests/{id}`. Null for a mutation.
         detail:
           type: string
           nullable: true
           description: |
-            What the row recorded beyond its action. For an admin
-            mutation it is JSON -- the state the change left behind, in
-            one of the `*AuditDetail` shapes in this document. For
-            routed traffic it is the alias or rule that produced the
-            ladder. A string rather than an object because the column
-            holds both.
+            JSON in one of the `*AuditDetail` shapes for a mutation; the alias or rule that produced the
+            ladder for routed traffic. A string because the column holds both.
         final_target:
           type: string
           nullable: true
@@ -1973,7 +1487,6 @@ components:
 
     AuditPage:
       type: object
-      description: One page of audit events, and where to continue from.
       required: [events, next_cursor]
       properties:
         events:
@@ -1985,29 +1498,15 @@ components:
           type: string
           nullable: true
           description: |
-            Where the next page starts, or null when this was the last
-            one. Opaque: pass it back unchanged as `cursor` and read
-            nothing into it. What it encodes is this implementation's
-            ordering key, which is free to change without the contract
-            changing.
-
-            It is null rather than a cursor that would return nothing,
-            so a caller stops on the page that filled `limit` exactly
-            instead of making one more request to find out.
-
+            Where the next page starts, null on the last. Opaque: pass it back as `cursor` with the same range.
     DecisionStatus:
       type: string
       enum: [ok, exhausted, truncated, client_disconnect, policy_blocked]
       description: |
-        How a request ended. `exhausted` means every target failed
-        before anything was sent to the client; `truncated` means it
-        died after the response had started. They are counted
-        separately rather than both called a failure because the second
-        one billed tokens and the first did not.
-
+        `exhausted` means every target failed before anything was sent; `truncated` means it died after
+        the response had started, and so billed tokens.
     DecisionTarget:
       type: object
-      description: One target in the ladder -- a configured place a request can be sent.
       required: [name]
       properties:
         name:
@@ -2038,8 +1537,7 @@ components:
     DecisionAttempt:
       type: object
       description: |
-        One target actually tried, in order. The last attempt without a
-        `failure` is the one that served; every attempt has a failure
+        One target actually tried, in order. The attempt without a `failure` served; every attempt has one
         when nothing did.
       required: [target, started_at, duration_ms]
       properties:
@@ -2055,16 +1553,13 @@ components:
 
     DecisionLadder:
       type: object
-      description: |
-        Which targets were eligible, in the order they would be tried,
-        and why that set rather than another.
+      description: Which targets were eligible, in the order they would be tried, and why that set.
       required: [targets]
       properties:
         reason_kind:
           type: string
           description: |
-            `model_alias` when the ladder came from the alias the client
-            asked for, `rule_match` when a routing rule produced it.
+            `model_alias` when the ladder came from the requested alias, `rule_match` when a rule produced it.
         model_alias:
           type: string
           description: The alias, when reason_kind is model_alias.
@@ -2092,25 +1587,16 @@ components:
 
     DecisionCost:
       type: object
-      description: |
-        What the request cost. Absent when it was never priced, which is
-        a different fact from a cost of zero: a free target costs zero,
-        an alias the price table does not cover costs nothing anyone can
-        state.
+      description: What the request cost. Absent when it was never priced, which is not the same as a cost of zero.
       required: [actual_nanos]
       properties:
         actual_nanos:
           type: integer
           format: int64
-          description: |
-            What it cost, in nanodollars (1e-9 USD) -- the unit it was
-            computed and stored in, so nothing is rounded on the way
-            out. A dashboard divides by 1e9 for display only.
+          description: What it cost, in nanodollars (1e-9 USD). Divide by 1e9 for display only.
         price_table_version:
           type: string
-          description: |
-            The price table the cost was computed against, pinned on the
-            row, so repricing later does not rewrite history.
+          description: The price table the cost was computed against, pinned so repricing does not rewrite history.
         counterfactuals:
           type: array
           items:
@@ -2142,21 +1628,13 @@ components:
           type: object
           additionalProperties:
             type: string
-          description: |
-            What the client attached with `x-go-route-*` headers, and
-            what `group_by=metadata` reports on.
+          description: What the client attached with `x-go-route-*` headers, and what `group_by=metadata` reports on.
 
     Decision:
       type: object
       description: |
-        One request's whole story, reassembled from the two tables it
-        was split across: `usage_ledger` for what it cost, `audit_log`
-        for why it went where it did.
-
-        A ledger row whose audit row has already aged out still answers
-        the money question, so `ladder` may be empty and `attempts` may
-        be absent on an old decision rather than the whole response
-        failing.
+        One request's whole story, from `usage_ledger` for cost and `audit_log` for routing. On a decision
+        whose audit row has aged out, `ladder` may be empty and `attempts` absent.
       required: [id, occurred_at, tenant, request, ladder, status, attempts, tokens, timing]
       properties:
         id:
@@ -2165,7 +1643,6 @@ components:
         occurred_at:
           type: string
           format: date-time
-          description: When the request was received.
         tenant:
           type: string
           description: The tenant's external_id.
@@ -2185,9 +1662,7 @@ components:
           description: The target that served, absent when none did.
         attempts:
           type: array
-          description: |
-            Every target tried, in order, successful or not. This is the
-            failover story, and the reason this endpoint exists.
+          description: Every target tried, in order, successful or not.
           items:
             $ref: "#/components/schemas/DecisionAttempt"
         tokens:
