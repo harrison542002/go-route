@@ -2,7 +2,19 @@ listen: ":4000"
 
 sink:
   dsn: ${DATABASE_URL}
-  buffer_size: 4096
+
+  # Every record is appended to a local spool before it goes to Postgres,
+  # so a slow or down database delays records instead of losing them.
+  # One directory per gateway process, on storage that survives a restart.
+  spool_dir: data/spool
+  segment_max_bytes: 67108864   # 64 MiB per segment file
+  sync: interval                # or "always": fsync before Record returns
+  sync_interval: 200ms          # worst-case loss window on power failure
+  max_spool_bytes: 1073741824   # 1 GiB: log an alarm past this, never drop
+  buffer_size: 4096             # records queued in memory for the file writer
+
+  # The shipper: rows per transaction, and how often a partly filled
+  # segment is sent anyway.
   batch_size: 100
   flush_interval: 1s
 

@@ -51,8 +51,13 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
-	//nolint:contextcheck // the sink's flush loop is deliberately detached; records must survive the request they describe
-	builtSink := buildSink(pool, cfg, prices)
+	//nolint:contextcheck // the sink's shipper is deliberately detached; records must survive the request they describe
+	builtSink, err := buildSink(pool, cfg, prices)
+	if err != nil {
+		_ = partitions.Stop()
+		pool.Close()
+		return nil, err
+	}
 
 	enforcer, closeQuota := buildQuota(ctx, pool, cfg, prices)
 

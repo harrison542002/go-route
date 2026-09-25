@@ -98,7 +98,10 @@ func boot(t *testing.T, yaml string) *httptest.Server {
 	// Postgres is not optional any more, so every booted config points at
 	// the suite's migrated container.
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	withDSN := fmt.Sprintf("sink:\n  dsn: %q\n%s", dsn, yaml)
+	// Each boot gets its own spool: the directory is locked per process, and a
+	// spool shared between specs would ship one spec's records into another's
+	// assertions.
+	withDSN := fmt.Sprintf("sink:\n  dsn: %q\n  spool_dir: %q\n%s", dsn, t.TempDir(), yaml)
 	if err := os.WriteFile(path, []byte(withDSN), 0o600); err != nil {
 		t.Fatal(err)
 	}

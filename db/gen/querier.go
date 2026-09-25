@@ -122,8 +122,19 @@ type Querier interface {
 	// primary key instead, which retention keeps to a small number.
 	//
 	GetUsageLedgerEntry(ctx context.Context, id uuid.UUID) (UsageLedger, error)
-	InsertAuditLog(ctx context.Context, arg []InsertAuditLogParams) (int64, error)
-	InsertUsageLedger(ctx context.Context, arg []InsertUsageLedgerParams) (int64, error)
+	// Idempotent for the same reason as InsertUsageLedgerRows: the spool
+	// replays after a crash, and a replayed row must be a no-op rather than
+	// a primary-key violation that fails the batch it arrived in.
+	//
+	InsertAuditLogRows(ctx context.Context, rows []byte) (int64, error)
+	// Idempotent on purpose. Records reach this table through the on-disk
+	// spool, which delivers at least once: a crash between the commit and
+	// the spool deleting its segment replays rows that are already here.
+	// COPY would fail the whole batch on the first duplicate primary key,
+	// so the batch arrives as one JSON array instead, typed by the table's
+	// own row type. The row count lets the caller see how many were new.
+	//
+	InsertUsageLedgerRows(ctx context.Context, rows []byte) (int64, error)
 	ListAPIKeysByTenant(ctx context.Context, tenantID uuid.UUID) ([]ApiKey, error)
 	ListActiveAPIKeys(ctx context.Context) ([]ListActiveAPIKeysRow, error)
 	ListAdminCredentials(ctx context.Context) ([]AdminCredential, error)

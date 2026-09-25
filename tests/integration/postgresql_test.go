@@ -11,6 +11,7 @@ import (
 
 	"github.com/harrison542002/go-route/internal/adapters/repositories"
 	"github.com/harrison542002/go-route/internal/core/domains"
+	"github.com/harrison542002/go-route/internal/ports"
 )
 
 var _ = Describe("RecordWriter", func() {
@@ -183,7 +184,7 @@ var _ = Describe("RecordWriter", func() {
 		})
 
 		It("rejects a record whose tenant was never provisioned", func() {
-			Expect(write(newDecision(withTenant("newco")))).NotTo(Succeed(),
+			Expect(write(newDecision(withTenant("newco")))).To(MatchError(ports.ErrRejected),
 				"the ledger must not invent the customer a charge is attributed to")
 
 			Expect(countRows("SELECT count(*) FROM tenants WHERE external_id = 'newco'")).
@@ -399,44 +400,82 @@ var _ = Describe("RecordWriter", func() {
 		})
 	})
 
-	Describe("failure modes", func() {
-		It("rejects a duplicate ID", func() {
+	Describe("replays", func() {
+		It("skips a record that is already stored", func() {
 			d := newDecision()
 			Expect(write(d)).To(Succeed())
-			Expect(write(d)).NotTo(Succeed(), "the primary key must reject a replayed record")
+			Expect(write(d)).To(Succeed(),
+				"the spool delivers at least once; a replay must be a no-op, not an error")
+
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE id = $1", d.ID.UUID())).To(Equal(1))
+			Expect(countRows("SELECT count(*) FROM audit_log WHERE id = $1", d.ID.UUID())).To(Equal(1))
+		})
+
+		It("writes the new records in a batch that repeats old ones", func() {
+			old, fresh := newDecision(), newDecision()
+			Expect(write(old)).To(Succeed())
+			Expect(write(old, fresh)).To(Succeed())
+
+			Expect(countRows("SELECT count(*) FROM usage_ledger")).To(Equal(2))
+			Expect(countRows("SELECT count(*) FROM audit_log")).To(Equal(2))
+		})
+
+		It("does not overwrite the stored row with the replayed one", func() {
+			d := newDecision()
+			Expect(write(d)).To(Succeed())
+
+			changed := d
+			changed.Outcome.Usage.Input = 999_999
+			Expect(write(changed)).To(Succeed())
+
+			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE id = $1 AND input_tokens = 80",
+				d.ID.UUID())).To(Equal(1), "the ledger is append-only; corrections are new rows")
+		})
+	})
+
+	Describe("failure modes", func() {
+		It("rejects a record outside every partition", func() {
+			far := newDecision(withTime(testTime.AddDate(5, 0, 0)))
+			Expect(write(far)).To(MatchError(ports.ErrRejected),
+				"a record with nowhere to go can never succeed, so the spool must dead-letter it")
 		})
 
 		It("fails the whole batch when one row is bad", func() {
 			good := newDecision()
-			dup := newDecision()
+			far := newDecision(withTime(testTime.AddDate(5, 0, 0)))
 
-			Expect(write(dup)).To(Succeed())
-			Expect(write(good, dup)).NotTo(Succeed())
+			Expect(write(good, far)).NotTo(Succeed())
 
 			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE id = $1", good.ID.UUID())).
-				To(BeZero(), "COPY is all-or-nothing; a partial batch would be harder to reason about")
+				To(BeZero(), "a batch is one transaction; a partial batch would be harder to reason about")
 		})
 
 		It("leaves no ledger row behind when the audit write fails", func() {
 			d := newDecision()
-			Expect(write(d)).To(Succeed())
 
 			c, cancel := ctx()
 			defer cancel()
-			_, err := pool.Exec(c, "DELETE FROM usage_ledger WHERE id = $1", d.ID.UUID())
+			_, err := pool.Exec(c, `
+				CREATE OR REPLACE FUNCTION fail_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN RAISE EXCEPTION 'audit write refused'; END $$`)
 			Expect(err).NotTo(HaveOccurred())
+			_, err = pool.Exec(c, `
+				CREATE TRIGGER fail_audit BEFORE INSERT ON audit_log
+				FOR EACH ROW EXECUTE FUNCTION fail_audit()`)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				c, cancel := ctx()
+				defer cancel()
+				_, err := pool.Exec(c, "DROP TRIGGER fail_audit ON audit_log")
+				Expect(err).NotTo(HaveOccurred())
+			})
 
-			// The surviving audit row makes the replay fail on audit_log's
-			// primary key rather than on the ledger's.
-			Expect(write(d)).NotTo(Succeed())
+			err = write(d)
+			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(MatchError(ports.ErrRejected),
+				"an error the rows did not cause is retried, not dead-lettered")
 			Expect(countRows("SELECT count(*) FROM usage_ledger WHERE id = $1", d.ID.UUID())).
 				To(BeZero(), "the ledger write must roll back with the audit write")
-		})
-
-		It("rejects a record outside every partition", func() {
-			far := newDecision(withTime(testTime.AddDate(5, 0, 0)))
-			Expect(write(far)).NotTo(Succeed(),
-				"a record with nowhere to go must fail loudly rather than vanish")
 		})
 
 		It("errors on a cancelled context rather than hanging", func() {

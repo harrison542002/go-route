@@ -43,3 +43,6 @@ startup-script
 # python
 __pycache__
 .pytest_cache
+
+# decision spool (sink.spool_dir default)
+/data/
