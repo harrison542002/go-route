@@ -1,6 +1,8 @@
 package proxyapi
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -35,27 +37,44 @@ type Handler struct {
 	resolver   Resolver
 	dispatcher ports.Dispatcher
 	sink       ports.DecisionSink
+	quota      ports.QuotaEnforcer
 	now        func() time.Time
 }
 
+// NewHandler wires the request path. A nil quota enforces nothing, which is
+// what a deployment without Redis gets.
 func NewHandler(
 	r Router,
 	res Resolver,
 	d ports.Dispatcher,
 	sink ports.DecisionSink,
+	quota ports.QuotaEnforcer,
 	now func() time.Time,
 ) *Handler {
 	if now == nil {
 		now = time.Now
 	}
-	return &Handler{router: r, resolver: res, dispatcher: d, sink: sink, now: now}
+	if quota == nil {
+		quota = unlimited{}
+	}
+	return &Handler{router: r, resolver: res, dispatcher: d, sink: sink, quota: quota, now: now}
 }
+
+// unlimited is the enforcer for a deployment with no quota store.
+type unlimited struct{}
+
+func (unlimited) Reserve(context.Context, ports.QuotaRequest) (ports.Reservation, error) {
+	return ports.Reservation{}, nil
+}
+
+func (unlimited) Reconcile(context.Context, ports.Reservation, domains.Outcome) {}
 
 func (h *Handler) Completions(w http.ResponseWriter, r *http.Request) {
 	now := h.now()
+	ctx := r.Context()
 	decisionID := domains.NewDecisionID()
 
-	identity, ok := IdentityFrom(r.Context())
+	identity, ok := IdentityFrom(ctx)
 	if !ok {
 		writeAuthError(w, ports.ErrNoCredentials)
 		return
@@ -93,9 +112,44 @@ func (h *Handler) Completions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Quota is the last gate before dispatch: a request refused for any other
+	// reason never takes a slot, and nothing that costs money has happened yet.
+	reservation, err := h.quota.Reserve(ctx, ports.QuotaRequest{
+		Tenant:          facts.Tenant,
+		At:              now,
+		Prompt:          facts.PromptSize,
+		MaxOutputTokens: facts.MaxOutputTokens,
+		Choices:         facts.Choices,
+		Targets:         targetNames(ladder),
+	})
+	if err != nil {
+		var exceeded *ports.QuotaExceededError
+		if errors.As(err, &exceeded) {
+			writeQuotaExceeded(w, decisionID, exceeded.Breach, now)
+			h.sink.Record(domains.NewRoutingDecision(decisionID, facts, ladder,
+				domains.Outcome{Status: domains.StatusPolicyBlocked}))
+			return
+		}
+
+		slog.Error("quota check unavailable; failing closed",
+			"decision_id", decisionID.String(), "err", err)
+		writeError(w, http.StatusServiceUnavailable,
+			"quota enforcement is unavailable", "internal_error")
+		return
+	}
+
+	var outcome domains.Outcome
+
+	// Deferred so it runs however dispatch ends, a panic included: a
+	// reservation never reconciled holds the tenant's budget until the window
+	// closes. A zero outcome releases the whole reservation.
+	defer func() {
+		h.quota.Reconcile(ctx, reservation, outcome)
+	}()
+
 	out := NewClientStream(w, decisionID, facts.Stream)
 
-	outcome := h.dispatcher.Run(r.Context(), targets, &ports.ProviderRequest{
+	outcome = h.dispatcher.Run(ctx, targets, &ports.ProviderRequest{
 		Body:       raw,
 		Stream:     facts.Stream,
 		WantsUsage: facts.WantsUsage,
@@ -107,4 +161,12 @@ func (h *Handler) Completions(w http.ResponseWriter, r *http.Request) {
 
 	decision := domains.NewRoutingDecision(decisionID, facts, ladder, outcome)
 	h.sink.Record(decision)
+}
+
+func targetNames(l domains.Ladder) []string {
+	out := make([]string, len(l.Targets))
+	for i, t := range l.Targets {
+		out[i] = t.Name
+	}
+	return out
 }

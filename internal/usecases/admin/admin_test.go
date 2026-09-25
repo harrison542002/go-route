@@ -414,14 +414,14 @@ func TestReplaceQuotasValidatesTheWholeSetFirst(t *testing.T) {
 	start := testNow
 	tests := map[string][]domains.Quota{
 		"duplicate kind": {
-			{WindowKind: domains.WindowDay, MaxRequests: ptr(int64(1))},
-			{WindowKind: domains.WindowDay, MaxTokens: ptr(int64(1))},
+			{WindowKind: domains.WindowDay, MaxCost: domains.USD(1)},
+			{WindowKind: domains.WindowDay, MaxCost: domains.USD(2)},
 		},
 		"period without end": {
-			{WindowKind: domains.WindowPeriod, PeriodStart: &start, MaxRequests: ptr(int64(1))},
+			{WindowKind: domains.WindowPeriod, PeriodStart: &start, MaxCost: domains.USD(1)},
 		},
-		"no limit": {{WindowKind: domains.WindowMinute}},
-		"negative": {{WindowKind: domains.WindowMinute, MaxCost: ptr(domains.USD(-5))}},
+		"unknown kind": {{WindowKind: "fortnight", MaxCost: domains.USD(1)}},
+		"negative":     {{WindowKind: domains.WindowMinute, MaxCost: domains.USD(-5)}},
 	}
 	for name, set := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -442,7 +442,7 @@ func TestReplaceQuotasDeletesThenWritesInEnumOrder(t *testing.T) {
 	var order []domains.WindowKind
 	gomock.InOrder(
 		f.quotas.EXPECT().List(gomock.Any(), id).Return([]domains.Quota{
-			{WindowKind: domains.WindowHour, MaxRequests: ptr(int64(5)), OnExceed: domains.QuotaBlock},
+			{WindowKind: domains.WindowHour, MaxCost: domains.USD(5), OnExceed: domains.QuotaBlock},
 		}, nil),
 		f.quotas.EXPECT().DeleteAll(gomock.Any(), id).Return(nil),
 		f.quotas.EXPECT().Upsert(gomock.Any(), id, gomock.Any()).DoAndReturn(
@@ -459,8 +459,8 @@ func TestReplaceQuotasDeletesThenWritesInEnumOrder(t *testing.T) {
 	)
 
 	got, err := f.svc.ReplaceQuotas(context.Background(), actor, "acme", []domains.Quota{
-		{WindowKind: domains.WindowMonth, MaxCost: ptr(domains.USD(1_000_000_000))},
-		{WindowKind: domains.WindowMinute, MaxRequests: ptr(int64(60)), OnExceed: domains.QuotaAllow},
+		{WindowKind: domains.WindowMonth, MaxCost: domains.USD(1_000_000_000)},
+		{WindowKind: domains.WindowMinute, MaxCost: domains.USD(60), OnExceed: domains.QuotaAllow},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -478,12 +478,12 @@ func TestReplaceQuotasWithTheSameSetDoesNothing(t *testing.T) {
 	f.expectTenant(acme())
 
 	current := []domains.Quota{
-		{WindowKind: domains.WindowMinute, MaxRequests: ptr(int64(60)), OnExceed: domains.QuotaBlock, UpdatedAt: testNow},
+		{WindowKind: domains.WindowMinute, MaxCost: domains.USD(60), OnExceed: domains.QuotaBlock, UpdatedAt: testNow},
 	}
 	f.quotas.EXPECT().List(gomock.Any(), acme().ID).Return(current, nil)
 
 	got, err := f.svc.ReplaceQuotas(context.Background(), actor, "acme", []domains.Quota{
-		{WindowKind: domains.WindowMinute, MaxRequests: ptr(int64(60))},
+		{WindowKind: domains.WindowMinute, MaxCost: domains.USD(60)},
 	})
 	if err != nil || len(got) != 1 {
 		t.Fatalf("got %v, %v", got, err)
@@ -494,7 +494,7 @@ func TestReplaceQuotasWithAnEmptySetRemovesEveryLimit(t *testing.T) {
 	f := newFixture(t)
 	f.expectTenant(acme())
 	f.quotas.EXPECT().List(gomock.Any(), acme().ID).Return([]domains.Quota{
-		{WindowKind: domains.WindowDay, MaxRequests: ptr(int64(1)), OnExceed: domains.QuotaBlock},
+		{WindowKind: domains.WindowDay, MaxCost: domains.USD(1), OnExceed: domains.QuotaBlock},
 	}, nil)
 	f.quotas.EXPECT().DeleteAll(gomock.Any(), acme().ID).Return(nil)
 	f.audit.EXPECT().Write(gomock.Any(), gomock.Any()).Return(nil)
@@ -519,10 +519,10 @@ func TestPutQuotaSkipsAnUnchangedLimit(t *testing.T) {
 	f := newFixture(t)
 	f.expectTenant(acme())
 	f.quotas.EXPECT().Get(gomock.Any(), acme().ID, domains.WindowDay).Return(
-		domains.Quota{WindowKind: domains.WindowDay, MaxTokens: ptr(int64(9)), OnExceed: domains.QuotaBlock}, nil)
+		domains.Quota{WindowKind: domains.WindowDay, MaxCost: domains.USD(9), OnExceed: domains.QuotaBlock}, nil)
 
 	_, err := f.svc.PutQuota(context.Background(), actor, "acme",
-		domains.Quota{WindowKind: domains.WindowDay, MaxTokens: ptr(int64(9))})
+		domains.Quota{WindowKind: domains.WindowDay, MaxCost: domains.USD(9)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +566,7 @@ func TestMutationsUseTheTransactionsContext(t *testing.T) {
 	disabled := acme()
 	disabled.DisabledAt = ptr(testNow)
 	k0 := key(false, nil)
-	day := domains.Quota{WindowKind: domains.WindowDay, MaxTokens: ptr(int64(9)), OnExceed: domains.QuotaBlock}
+	day := domains.Quota{WindowKind: domains.WindowDay, MaxCost: domains.USD(9), OnExceed: domains.QuotaBlock}
 
 	tests := []struct {
 		name   string

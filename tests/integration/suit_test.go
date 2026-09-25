@@ -20,10 +20,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// TestMain owns the database for the whole package.
+// TestMain owns the database, and the Redis that quota counters live in, for
+// the whole package.
 //
 // It cannot be a Ginkgo BeforeSuite: the end-to-end specs are plain Test
 // functions, and Go runs those independently of the Ginkgo suite -- in
@@ -45,7 +47,14 @@ func TestIntegration(t *testing.T) {
 var (
 	dsn  string
 	pool *pgxpool.Pool
+
+	// redisAddr is host:port of the suite's Redis. Specs that need to take
+	// Redis down start their own rather than stopping this one.
+	redisAddr string
 )
+
+// redisImage is shared by the suite's Redis and any a spec starts itself.
+const redisImage = "redis:7-alpine"
 
 // runSuite is separate from TestMain so its defers run: os.Exit skips
 // them, and a leaked container outlives the test binary.
@@ -74,6 +83,20 @@ func runSuite(m *testing.M) (int, error) {
 
 	if dsn, err = container.ConnectionString(ctx, "sslmode=disable"); err != nil {
 		return 0, fmt.Errorf("connection string: %w", err)
+	}
+
+	redisContainer, err := tcredis.Run(ctx, redisImage)
+	if err != nil {
+		return 0, fmt.Errorf("start redis: %w", err)
+	}
+	defer func() {
+		stop, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stopCancel()
+		_ = redisContainer.Terminate(stop)
+	}()
+
+	if redisAddr, err = redisContainer.Endpoint(ctx, ""); err != nil {
+		return 0, fmt.Errorf("redis endpoint: %w", err)
 	}
 
 	if pool, err = pgxpool.New(ctx, dsn); err != nil {

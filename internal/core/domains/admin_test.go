@@ -17,21 +17,18 @@ func TestQuotaValidate(t *testing.T) {
 		quota Quota
 		ok    bool
 	}{
-		{"clock window with one limit", Quota{WindowKind: WindowDay, MaxRequests: ptr(int64(100)), OnExceed: QuotaBlock}, true},
-		{"zero is a limit, not unset", Quota{WindowKind: WindowMinute, MaxTokens: ptr(int64(0)), OnExceed: QuotaAllow}, true},
-		{"period with dates", Quota{WindowKind: WindowPeriod, PeriodStart: &start, PeriodEnd: &end, MaxCost: ptr(USD(5)), OnExceed: QuotaBlock}, true},
+		{"clock window with a cap", Quota{WindowKind: WindowDay, MaxCost: USD(100), OnExceed: QuotaBlock}, true},
+		{"zero caps at nothing", Quota{WindowKind: WindowMinute, MaxCost: 0, OnExceed: QuotaAllow}, true},
+		{"period with dates", Quota{WindowKind: WindowPeriod, PeriodStart: &start, PeriodEnd: &end, MaxCost: USD(5), OnExceed: QuotaBlock}, true},
 
-		{"unknown kind", Quota{WindowKind: "week", MaxRequests: ptr(int64(1)), OnExceed: QuotaBlock}, false},
-		{"period without dates", Quota{WindowKind: WindowPeriod, MaxRequests: ptr(int64(1)), OnExceed: QuotaBlock}, false},
-		{"period with only a start", Quota{WindowKind: WindowPeriod, PeriodStart: &start, MaxRequests: ptr(int64(1)), OnExceed: QuotaBlock}, false},
-		{"period ending before it starts", Quota{WindowKind: WindowPeriod, PeriodStart: &end, PeriodEnd: &start, MaxRequests: ptr(int64(1)), OnExceed: QuotaBlock}, false},
-		{"period of zero length", Quota{WindowKind: WindowPeriod, PeriodStart: &start, PeriodEnd: &start, MaxRequests: ptr(int64(1)), OnExceed: QuotaBlock}, false},
-		{"clock window with dates", Quota{WindowKind: WindowMonth, PeriodStart: &start, PeriodEnd: &end, MaxRequests: ptr(int64(1)), OnExceed: QuotaBlock}, false},
-		{"limits nothing", Quota{WindowKind: WindowHour, OnExceed: QuotaBlock}, false},
-		{"negative requests", Quota{WindowKind: WindowHour, MaxRequests: ptr(int64(-1)), OnExceed: QuotaBlock}, false},
-		{"negative tokens", Quota{WindowKind: WindowHour, MaxTokens: ptr(int64(-1)), OnExceed: QuotaBlock}, false},
-		{"negative cost", Quota{WindowKind: WindowHour, MaxCost: ptr(USD(-1)), OnExceed: QuotaBlock}, false},
-		{"unknown action", Quota{WindowKind: WindowHour, MaxRequests: ptr(int64(1)), OnExceed: "warn"}, false},
+		{"unknown kind", Quota{WindowKind: "week", MaxCost: USD(1), OnExceed: QuotaBlock}, false},
+		{"period without dates", Quota{WindowKind: WindowPeriod, MaxCost: USD(1), OnExceed: QuotaBlock}, false},
+		{"period with only a start", Quota{WindowKind: WindowPeriod, PeriodStart: &start, MaxCost: USD(1), OnExceed: QuotaBlock}, false},
+		{"period ending before it starts", Quota{WindowKind: WindowPeriod, PeriodStart: &end, PeriodEnd: &start, MaxCost: USD(1), OnExceed: QuotaBlock}, false},
+		{"period of zero length", Quota{WindowKind: WindowPeriod, PeriodStart: &start, PeriodEnd: &start, MaxCost: USD(1), OnExceed: QuotaBlock}, false},
+		{"clock window with dates", Quota{WindowKind: WindowMonth, PeriodStart: &start, PeriodEnd: &end, MaxCost: USD(1), OnExceed: QuotaBlock}, false},
+		{"negative cost", Quota{WindowKind: WindowHour, MaxCost: USD(-1), OnExceed: QuotaBlock}, false},
+		{"unknown action", Quota{WindowKind: WindowHour, MaxCost: USD(1), OnExceed: "warn"}, false},
 	}
 
 	for _, tt := range tests {
@@ -52,19 +49,18 @@ func TestQuotaSameLimits(t *testing.T) {
 	sameInstant := start.In(time.FixedZone("UTC+7", 7*3600))
 
 	base := Quota{WindowKind: WindowPeriod, PeriodStart: &start, PeriodEnd: ptr(start.Add(time.Hour)),
-		MaxRequests: ptr(int64(10)), OnExceed: QuotaBlock, UpdatedAt: start}
+		MaxCost: USD(10), OnExceed: QuotaBlock, UpdatedAt: start}
 
 	other := base
 	other.PeriodStart = &sameInstant
-	other.MaxRequests = ptr(int64(10))
 	other.UpdatedAt = start.Add(time.Hour)
 	if !base.SameLimits(other) {
 		t.Error("same instant in another zone, and a different updated_at, should not count as a change")
 	}
 
-	other.MaxTokens = ptr(int64(0))
+	other.MaxCost = 0
 	if base.SameLimits(other) {
-		t.Error("an added limit of zero is a change: nil is unlimited, zero is nothing")
+		t.Error("lowering the cap to zero is a change")
 	}
 }
 

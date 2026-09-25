@@ -38,6 +38,7 @@ func TestExtractFacts(t *testing.T) {
 				Stream:         false,
 				WantsUsage:     false,
 				Metadata:       map[string]string{},
+				PromptSize:     domains.PromptSize{TextBytes: 2, Messages: 1},
 			},
 		},
 		{
@@ -116,6 +117,7 @@ func TestExtractFacts(t *testing.T) {
 			want: domains.RequestFacts{
 				RequestedModel: "m",
 				Metadata:       map[string]string{},
+				PromptSize:     domains.PromptSize{TextBytes: len(`[{"type":"function"}]`)},
 			},
 		},
 		{
@@ -124,6 +126,7 @@ func TestExtractFacts(t *testing.T) {
 			want: domains.RequestFacts{
 				RequestedModel: "m",
 				Metadata:       map[string]string{},
+				PromptSize:     domains.PromptSize{TextBytes: 12, Messages: 1, MediaParts: 1},
 			},
 		},
 	}
@@ -187,5 +190,67 @@ func TestExtractFacts_TenantComesFromTheCaller(t *testing.T) {
 	}
 	if v, ok := got.Metadata[tenantKey]; ok {
 		t.Errorf("tenant header became metadata key %q = %q", tenantKey, v)
+	}
+}
+
+// These figures size the quota reservation, so a request's worst case has to be
+// read from the same body the provider will be sent.
+func TestExtractFacts_SizesTheReservation(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantPrompt domains.PromptSize
+		wantMax    int
+		wantN      int
+	}{
+		{
+			name:       "max_tokens is the ceiling",
+			body:       `{"model":"m","messages":[{"role":"user","content":"abcd"}],"max_tokens":256}`,
+			wantPrompt: domains.PromptSize{TextBytes: 4, Messages: 1},
+			wantMax:    256,
+		},
+		{
+			name:    "max_completion_tokens wins over the deprecated max_tokens",
+			body:    `{"model":"m","messages":[],"max_tokens":256,"max_completion_tokens":1024}`,
+			wantMax: 1024,
+		},
+		{
+			name:  "n multiplies the output",
+			body:  `{"model":"m","messages":[],"n":3}`,
+			wantN: 3,
+		},
+		{
+			name: "no ceiling is zero, for the enforcer's default to fill",
+			body: `{"model":"m","messages":[]}`,
+		},
+		{
+			// An odd shape makes the estimate rough, not the request invalid.
+			name:       "junk ceilings and content are tolerated",
+			body:       `{"model":"m","messages":[{"content":{"odd":true}}],"max_tokens":"lots","n":-2}`,
+			wantPrompt: domains.PromptSize{TextBytes: len(`{"odd":true}`), Messages: 1},
+		},
+		{
+			name:       "messages that are not an array fall back to their raw length",
+			body:       `{"model":"m","messages":"hello"}`,
+			wantPrompt: domains.PromptSize{TextBytes: len(`"hello"`)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ExtractFacts(newRequest(t, tt.body, nil), []byte(tt.body), "acme", testNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.PromptSize != tt.wantPrompt {
+				t.Errorf("PromptSize = %+v, want %+v", got.PromptSize, tt.wantPrompt)
+			}
+			if got.MaxOutputTokens != tt.wantMax {
+				t.Errorf("MaxOutputTokens = %d, want %d", got.MaxOutputTokens, tt.wantMax)
+			}
+			if got.Choices != tt.wantN {
+				t.Errorf("Choices = %d, want %d", got.Choices, tt.wantN)
+			}
+		})
 	}
 }

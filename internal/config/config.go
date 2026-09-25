@@ -19,6 +19,47 @@ type Config struct {
 	Models    map[string][]string `yaml:"models"`
 	Sink      Sink                `yaml:"sink"`
 	Pricing   Pricing             `yaml:"pricing"`
+	Redis     Redis               `yaml:"redis"`
+	Quota     Quota               `yaml:"quota"`
+}
+
+type Redis struct {
+	Addr     string `yaml:"addr"`
+	Password string `yaml:"password"`
+	DB       int    `yaml:"db"`
+
+	// Timeout bounds every Redis call on the request path, so an outage costs
+	// each request this long rather than a TCP timeout.
+	Timeout time.Duration `yaml:"timeout"`
+
+	// OnUnavailable is "open" (serve, unenforced) or "closed" (503) for when
+	// Redis cannot be reached.
+	OnUnavailable string `yaml:"on_unavailable"`
+}
+
+// Enabled reports whether quota enforcement is configured.
+func (r Redis) Enabled() bool { return r.Addr != "" }
+
+// Quota tunes enforcement. Everything has a default; the block can be left out.
+type Quota struct {
+	// DefaultMaxOutputTokens is reserved for a request that sets no max_tokens
+	// or max_completion_tokens.
+	DefaultMaxOutputTokens int `yaml:"default_max_output_tokens"`
+
+	// LimitsTTL is how long a tenant's quota rows are cached, and so how long a
+	// changed limit takes to bite.
+	LimitsTTL time.Duration `yaml:"limits_ttl"`
+
+	// FlushInterval and FlushBuffer govern how usage counter deltas reach
+	// Postgres, the snapshot a lost Redis is rebuilt from.
+	FlushInterval time.Duration `yaml:"flush_interval"`
+	FlushBuffer   int           `yaml:"flush_buffer"`
+
+	// ResyncInterval is how often live counters are raised back to that
+	// snapshot. It cannot be switched off: a failover to a replica missing
+	// acknowledged writes lowers a counter silently, and only this raises it
+	// back before the window ends.
+	ResyncInterval time.Duration `yaml:"resync_interval"`
 }
 
 type Sink struct {
@@ -92,6 +133,8 @@ func Load(path string) (*Config, error) {
 	if cfg.Listen == "" {
 		cfg.Listen = ":4000"
 	}
+	cfg.applyQuotaDefaults()
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -163,6 +206,7 @@ func (c *Config) validate() error {
 	}
 
 	errs = append(errs, c.validatePricing()...)
+	errs = append(errs, c.validateQuota()...)
 
 	if len(errs) > 0 {
 		sort.Strings(errs)
@@ -214,6 +258,64 @@ func (c *Config) validatePricing() []string {
 				}
 			}
 		}
+	}
+
+	return errs
+}
+
+func (c *Config) applyQuotaDefaults() {
+	if c.Redis.Timeout == 0 {
+		c.Redis.Timeout = 100 * time.Millisecond
+	}
+	if c.Redis.OnUnavailable == "" {
+		c.Redis.OnUnavailable = "open"
+	}
+	if c.Quota.DefaultMaxOutputTokens == 0 {
+		c.Quota.DefaultMaxOutputTokens = 4096
+	}
+	if c.Quota.LimitsTTL == 0 {
+		c.Quota.LimitsTTL = 10 * time.Second
+	}
+	if c.Quota.FlushInterval == 0 {
+		c.Quota.FlushInterval = time.Second
+	}
+	if c.Quota.FlushBuffer == 0 {
+		c.Quota.FlushBuffer = 8192
+	}
+	if c.Quota.ResyncInterval == 0 {
+		c.Quota.ResyncInterval = time.Minute
+	}
+}
+
+func (c *Config) validateQuota() []string {
+	var errs []string
+
+	switch c.Redis.OnUnavailable {
+	case "open", "closed":
+	default:
+		errs = append(errs, fmt.Sprintf(
+			"redis: on_unavailable must be open or closed, got %q", c.Redis.OnUnavailable))
+	}
+	if c.Redis.Timeout < 0 {
+		errs = append(errs, "redis: timeout must not be negative")
+	}
+	if c.Redis.DB < 0 {
+		errs = append(errs, "redis: db must not be negative")
+	}
+	if c.Quota.DefaultMaxOutputTokens < 0 {
+		errs = append(errs, "quota: default_max_output_tokens must not be negative")
+	}
+	if c.Quota.LimitsTTL < 0 {
+		errs = append(errs, "quota: limits_ttl must not be negative")
+	}
+	if c.Quota.FlushInterval < 0 {
+		errs = append(errs, "quota: flush_interval must not be negative")
+	}
+	if c.Quota.FlushBuffer < 0 {
+		errs = append(errs, "quota: flush_buffer must not be negative")
+	}
+	if c.Quota.ResyncInterval < 0 {
+		errs = append(errs, "quota: resync_interval must be positive")
 	}
 
 	return errs

@@ -198,15 +198,18 @@ func TestMalformedBodiesAreRejectedBeforeTheUseCase(t *testing.T) {
 		"patch key bare": {method: "PATCH", path: "/admin/v1/keys/" + keyUUID.String(), body: `{}`},
 		"allowlist type": {method: "PATCH", path: "/admin/v1/keys/" + keyUUID.String(), body: `{"model_allowlist":"chat"}`},
 		"quotas missing": {method: "PUT", path: "/admin/v1/tenants/acme/quotas", body: `{}`},
-		"quota typo":     {method: "PUT", path: "/admin/v1/tenants/acme/quotas/day", body: `{"max_request":5}`},
-		"quota window":   {method: "PUT", path: "/admin/v1/tenants/acme/quotas/day", body: `{"window_kind":"hour","max_requests":5}`},
+		"quota typo":     {method: "PUT", path: "/admin/v1/tenants/acme/quotas/day", body: `{"max_cost":5}`},
+		"quota window":   {method: "PUT", path: "/admin/v1/tenants/acme/quotas/day", body: `{"window_kind":"hour","max_cost_nanos":5}`},
+		"quota capless":  {method: "PUT", path: "/admin/v1/tenants/acme/quotas/day", body: `{"on_exceed":"block"}`},
+		"quota retired":  {method: "PUT", path: "/admin/v1/tenants/acme/quotas/day", body: `{"max_cost_nanos":5,"max_requests":60}`},
+		"set retired":    {method: "PUT", path: "/admin/v1/tenants/acme/quotas", body: `{"quotas":[{"window_kind":"day","max_cost_nanos":5,"max_tokens":60}]}`},
 		"bad limit":      {method: "GET", path: "/admin/v1/tenants?limit=ten"},
 		"limit too high": {method: "GET", path: "/admin/v1/tenants?limit=1001"},
-		"bad enum":       {method: "PUT", path: "/admin/v1/tenants/acme/quotas/day", body: `{"max_requests":5,"on_exceed":"warn"}`},
+		"bad enum":       {method: "PUT", path: "/admin/v1/tenants/acme/quotas/day", body: `{"max_cost_nanos":5,"on_exceed":"warn"}`},
 		"bad window":     {method: "GET", path: "/admin/v1/tenants/acme/quotas/fortnight"},
-		"set item typo":  {method: "PUT", path: "/admin/v1/tenants/acme/quotas", body: `{"quotas":[{"window_kind":"day","max_token":5}]}`},
-		"negative limit": {method: "PUT", path: "/admin/v1/tenants/acme/quotas/day", body: `{"max_tokens":-1}`},
-		"bad date":       {method: "PUT", path: "/admin/v1/tenants/acme/quotas/period", body: `{"period_start":"yesterday","max_tokens":1}`},
+		"set item typo":  {method: "PUT", path: "/admin/v1/tenants/acme/quotas", body: `{"quotas":[{"window_kind":"day","max_cost":5}]}`},
+		"negative limit": {method: "PUT", path: "/admin/v1/tenants/acme/quotas/day", body: `{"max_cost_nanos":-1}`},
+		"bad date":       {method: "PUT", path: "/admin/v1/tenants/acme/quotas/period", body: `{"period_start":"yesterday","max_cost_nanos":1}`},
 		"metadata array": {method: "POST", path: "/admin/v1/tenants", body: `{"external_id":"a","name":"A","metadata":[1]}`},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -360,14 +363,14 @@ func TestReplaceQuotasDecodesTheSet(t *testing.T) {
 			}
 			p := set[1]
 			if p.WindowKind != domains.WindowPeriod || !p.PeriodStart.Equal(start) ||
-				p.MaxCost == nil || *p.MaxCost != 5_000_000_000 || p.OnExceed != domains.QuotaAllow {
+				p.MaxCost != 5_000_000_000 || p.OnExceed != domains.QuotaAllow {
 				t.Errorf("period quota = %+v", p)
 			}
 			return set, nil
 		})
 
 	resp, body := do(t, srv, call{method: "PUT", path: "/admin/v1/tenants/acme/quotas", body: `{"quotas":[
-		{"window_kind":"minute","max_requests":60},
+		{"window_kind":"minute","max_cost_nanos":60},
 		{"window_kind":"period","period_start":"2026-09-14T00:00:00Z","period_end":"2026-10-14T00:00:00Z",
 		 "max_cost_nanos":5000000000,"on_exceed":"allow"}
 	]}`})
@@ -396,7 +399,7 @@ func TestPutQuotaTakesTheWindowFromThePath(t *testing.T) {
 			return q, nil
 		})
 
-	resp, _ := do(t, srv, call{method: "PUT", path: "/admin/v1/tenants/acme/quotas/day", body: `{"max_tokens":100}`})
+	resp, _ := do(t, srv, call{method: "PUT", path: "/admin/v1/tenants/acme/quotas/day", body: `{"max_cost_nanos":100}`})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
@@ -426,7 +429,7 @@ func TestValidationErrorsNameTheField(t *testing.T) {
 			[]string{"request body", `"plan"`, "unsupported"},
 		},
 		"bad enum": {
-			call{method: "PUT", path: "/admin/v1/tenants/acme/quotas", body: `{"quotas":[{"window_kind":"day","max_requests":1,"on_exceed":"warn"}]}`},
+			call{method: "PUT", path: "/admin/v1/tenants/acme/quotas", body: `{"quotas":[{"window_kind":"day","max_cost_nanos":1,"on_exceed":"warn"}]}`},
 			[]string{"quotas.0.on_exceed", "allowed values"},
 		},
 		"missing field": {
@@ -442,7 +445,7 @@ func TestValidationErrorsNameTheField(t *testing.T) {
 			[]string{"parameter key", "UUID"},
 		},
 		"bad date": {
-			call{method: "PUT", path: "/admin/v1/tenants/acme/quotas/period", body: `{"period_start":"yesterday","max_tokens":1}`},
+			call{method: "PUT", path: "/admin/v1/tenants/acme/quotas/period", body: `{"period_start":"yesterday","max_cost_nanos":1}`},
 			[]string{"period_start", "date-time"},
 		},
 	} {

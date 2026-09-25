@@ -1,6 +1,12 @@
-.PHONY: build build-proxy build-admin generate sqlc openapi migrate migrate-diff migrate-hash migrate-lint unit-test integration-test test-all
+.PHONY: build build-proxy build-admin dev-up dev-down generate sqlc openapi migrate migrate-diff migrate-hash migrate-lint unit-test integration-test test-all
 
 build: build-proxy build-admin
+
+dev-up:
+	docker compose up -d --wait
+
+dev-down:
+	docker compose down -v
 
 build-proxy:
 	go build -o bin/ ./cmd/go-route

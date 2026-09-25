@@ -1,5 +1,3 @@
-// Package bootstrap is the composition root: the single place that decides
-// which concrete adapters satisfy which ports.
 package bootstrap
 
 import (
@@ -46,21 +44,28 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	//nolint:contextcheck // maintenance outlives any caller's context by design
 	partitions.Start()
 
-	//nolint:contextcheck // the sink's flush loop is deliberately detached; records must survive the request they describe
-	builtSink, err := buildSink(pool, cfg)
+	prices, err := buildPricingTable(cfg)
 	if err != nil {
 		_ = partitions.Stop()
 		pool.Close()
 		return nil, err
 	}
 
+	//nolint:contextcheck // the sink's flush loop is deliberately detached; records must survive the request they describe
+	builtSink := buildSink(pool, cfg, prices)
+
+	enforcer, closeQuota := buildQuota(ctx, pool, cfg, prices)
+
 	return &App{
 		Handler: proxyapi.NewHandler(
-			table, resolver, dispatch.New(time.Now), builtSink, time.Now),
+			table, resolver, dispatch.New(time.Now), builtSink, enforcer, time.Now),
 		Auth: repositories.NewAuth(pool),
 		Sink: builtSink,
 		Close: func() error {
-			err := partitions.Stop()
+			err := closeQuota()
+			if perr := partitions.Stop(); err == nil {
+				err = perr
+			}
 			pool.Close()
 			return err
 		},

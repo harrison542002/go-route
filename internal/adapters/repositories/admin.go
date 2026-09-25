@@ -230,19 +230,12 @@ func (r quotaRepo) List(ctx context.Context, tenantID uuid.UUID) ([]domains.Quot
 }
 
 func (r quotaRepo) Upsert(ctx context.Context, tenantID uuid.UUID, q domains.Quota) (domains.Quota, error) {
-	var maxCost *int64
-	if q.MaxCost != nil {
-		n := int64(*q.MaxCost)
-		maxCost = &n
-	}
 	row, err := r.q.UpsertQuota(ctx, gen.UpsertQuotaParams{
 		TenantID:     tenantID,
 		WindowKind:   gen.WindowKind(q.WindowKind),
 		PeriodStart:  q.PeriodStart,
 		PeriodEnd:    q.PeriodEnd,
-		MaxRequests:  q.MaxRequests,
-		MaxTokens:    q.MaxTokens,
-		MaxCostNanos: maxCost,
+		MaxCostNanos: int64(q.MaxCost),
 		OnExceed:     gen.QuotaAction(q.OnExceed),
 	})
 	if err != nil {
@@ -324,18 +317,12 @@ func apiKey(r gen.ApiKey) domains.APIKey {
 }
 
 func quota(r gen.Quota) domains.Quota {
-	q := domains.Quota{
+	return domains.Quota{
 		WindowKind:  domains.WindowKind(r.WindowKind),
 		PeriodStart: r.PeriodStart,
 		PeriodEnd:   r.PeriodEnd,
-		MaxRequests: r.MaxRequests,
-		MaxTokens:   r.MaxTokens,
+		MaxCost:     domains.USD(r.MaxCostNanos),
 		OnExceed:    domains.QuotaAction(r.OnExceed),
 		UpdatedAt:   r.UpdatedAt,
 	}
-	if r.MaxCostNanos != nil {
-		c := domains.USD(*r.MaxCostNanos)
-		q.MaxCost = &c
-	}
-	return q
 }

@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/oapi-codegen/nullable"
-
 	"github.com/harrison542002/go-route/internal/core/domains"
 	"github.com/harrison542002/go-route/internal/ports"
 	"github.com/harrison542002/go-route/schemas/admin/gen"
@@ -190,34 +188,17 @@ func sameQuotaSet(current, desired []domains.Quota) bool {
 	return true
 }
 
-// quotaDetails renders the whole set a quota mutation wrote, for audit_log. A
-// nil limit becomes an explicit null, not the zero an unspecified nullable
-// marshals as: unlimited and 0 are opposite facts.
+// quotaDetails renders the whole set a quota mutation wrote, for audit_log.
 func quotaDetails(set []domains.Quota) []gen.QuotaAuditDetail {
 	out := make([]gen.QuotaAuditDetail, 0, len(set))
 	for _, q := range set {
-		d := gen.QuotaAuditDetail{
+		out = append(out, gen.QuotaAuditDetail{
 			WindowKind:   gen.WindowKind(q.WindowKind),
 			PeriodStart:  q.PeriodStart,
 			PeriodEnd:    q.PeriodEnd,
-			MaxRequests:  nullableOf(q.MaxRequests),
-			MaxTokens:    nullableOf(q.MaxTokens),
-			MaxCostNanos: nullable.NewNullNullable[int64](),
+			MaxCostNanos: int64(q.MaxCost),
 			OnExceed:     gen.QuotaAction(q.OnExceed),
-		}
-		if q.MaxCost != nil {
-			d.MaxCostNanos = nullable.NewNullableWithValue(int64(*q.MaxCost))
-		}
-		out = append(out, d)
+		})
 	}
 	return out
-}
-
-// nullableOf renders a nil pointer as an explicit JSON null, where a
-// nullable.Nullable left unspecified would marshal as T's zero value.
-func nullableOf[T any](p *T) nullable.Nullable[T] {
-	if p == nil {
-		return nullable.NewNullNullable[T]()
-	}
-	return nullable.NewNullableWithValue(*p)
 }
