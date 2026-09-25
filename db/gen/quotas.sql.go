@@ -42,7 +42,7 @@ func (q *Queries) DeleteQuotasForTenant(ctx context.Context, tenantID uuid.UUID)
 }
 
 const getQuota = `-- name: GetQuota :one
-SELECT tenant_id, window_kind, period_start, period_end, max_requests, max_tokens, max_cost_nanos, on_exceed, updated_at FROM quotas WHERE tenant_id = $1 AND window_kind = $2
+SELECT tenant_id, window_kind, period_start, period_end, max_cost_nanos, on_exceed, updated_at FROM quotas WHERE tenant_id = $1 AND window_kind = $2
 `
 
 type GetQuotaParams struct {
@@ -58,8 +58,6 @@ func (q *Queries) GetQuota(ctx context.Context, arg GetQuotaParams) (Quota, erro
 		&i.WindowKind,
 		&i.PeriodStart,
 		&i.PeriodEnd,
-		&i.MaxRequests,
-		&i.MaxTokens,
 		&i.MaxCostNanos,
 		&i.OnExceed,
 		&i.UpdatedAt,
@@ -73,8 +71,6 @@ SELECT
     q.window_kind,
     q.period_start,
     q.period_end,
-    q.max_requests,
-    q.max_tokens,
     q.max_cost_nanos,
     q.on_exceed,
     COALESCE(c.requests, 0)::bigint   AS used_requests,
@@ -98,9 +94,7 @@ type GetQuotaStatusRow struct {
 	WindowKind    WindowKind
 	PeriodStart   *time.Time
 	PeriodEnd     *time.Time
-	MaxRequests   *int64
-	MaxTokens     *int64
-	MaxCostNanos  *int64
+	MaxCostNanos  int64
 	OnExceed      QuotaAction
 	UsedRequests  int64
 	UsedTokens    int64
@@ -123,8 +117,6 @@ func (q *Queries) GetQuotaStatus(ctx context.Context, arg GetQuotaStatusParams) 
 			&i.WindowKind,
 			&i.PeriodStart,
 			&i.PeriodEnd,
-			&i.MaxRequests,
-			&i.MaxTokens,
 			&i.MaxCostNanos,
 			&i.OnExceed,
 			&i.UsedRequests,
@@ -142,7 +134,7 @@ func (q *Queries) GetQuotaStatus(ctx context.Context, arg GetQuotaStatusParams) 
 }
 
 const listQuotas = `-- name: ListQuotas :many
-SELECT tenant_id, window_kind, period_start, period_end, max_requests, max_tokens, max_cost_nanos, on_exceed, updated_at FROM quotas WHERE tenant_id = $1 ORDER BY window_kind
+SELECT tenant_id, window_kind, period_start, period_end, max_cost_nanos, on_exceed, updated_at FROM quotas WHERE tenant_id = $1 ORDER BY window_kind
 `
 
 func (q *Queries) ListQuotas(ctx context.Context, tenantID uuid.UUID) ([]Quota, error) {
@@ -159,8 +151,6 @@ func (q *Queries) ListQuotas(ctx context.Context, tenantID uuid.UUID) ([]Quota, 
 			&i.WindowKind,
 			&i.PeriodStart,
 			&i.PeriodEnd,
-			&i.MaxRequests,
-			&i.MaxTokens,
 			&i.MaxCostNanos,
 			&i.OnExceed,
 			&i.UpdatedAt,
@@ -178,17 +168,15 @@ func (q *Queries) ListQuotas(ctx context.Context, tenantID uuid.UUID) ([]Quota, 
 const upsertQuota = `-- name: UpsertQuota :one
 INSERT INTO quotas (
     tenant_id, window_kind, period_start, period_end,
-    max_requests, max_tokens, max_cost_nanos, on_exceed, updated_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+    max_cost_nanos, on_exceed, updated_at
+) VALUES ($1, $2, $3, $4, $5, $6, now())
 ON CONFLICT (tenant_id, window_kind) DO UPDATE SET
     period_start   = EXCLUDED.period_start,
     period_end     = EXCLUDED.period_end,
-    max_requests   = EXCLUDED.max_requests,
-    max_tokens     = EXCLUDED.max_tokens,
     max_cost_nanos = EXCLUDED.max_cost_nanos,
     on_exceed      = EXCLUDED.on_exceed,
     updated_at     = now()
-RETURNING tenant_id, window_kind, period_start, period_end, max_requests, max_tokens, max_cost_nanos, on_exceed, updated_at
+RETURNING tenant_id, window_kind, period_start, period_end, max_cost_nanos, on_exceed, updated_at
 `
 
 type UpsertQuotaParams struct {
@@ -196,9 +184,7 @@ type UpsertQuotaParams struct {
 	WindowKind   WindowKind
 	PeriodStart  *time.Time
 	PeriodEnd    *time.Time
-	MaxRequests  *int64
-	MaxTokens    *int64
-	MaxCostNanos *int64
+	MaxCostNanos int64
 	OnExceed     QuotaAction
 }
 
@@ -208,8 +194,6 @@ func (q *Queries) UpsertQuota(ctx context.Context, arg UpsertQuotaParams) (Quota
 		arg.WindowKind,
 		arg.PeriodStart,
 		arg.PeriodEnd,
-		arg.MaxRequests,
-		arg.MaxTokens,
 		arg.MaxCostNanos,
 		arg.OnExceed,
 	)
@@ -219,8 +203,6 @@ func (q *Queries) UpsertQuota(ctx context.Context, arg UpsertQuotaParams) (Quota
 		&i.WindowKind,
 		&i.PeriodStart,
 		&i.PeriodEnd,
-		&i.MaxRequests,
-		&i.MaxTokens,
 		&i.MaxCostNanos,
 		&i.OnExceed,
 		&i.UpdatedAt,

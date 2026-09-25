@@ -190,11 +190,11 @@ var _ = Describe("Admin API", func() {
 			createTenant()
 			path := "/admin/v1/tenants/" + external + "/quotas/day"
 
-			first := call("PUT", path, `{"max_requests":500}`)
+			first := call("PUT", path, `{"max_cost_nanos":500}`)
 			Expect(first.status).To(Equal(http.StatusOK), first.body)
-			again := call("PUT", path, `{"max_requests":500}`)
+			again := call("PUT", path, `{"max_cost_nanos":500}`)
 			Expect(again.status).To(Equal(http.StatusOK), again.body)
-			Expect(again.body).To(ContainSubstring(`"max_requests":500`))
+			Expect(again.body).To(ContainSubstring(`"max_cost_nanos":500`))
 
 			Expect(countRows(`SELECT count(*) FROM quotas q JOIN tenants t ON t.id = q.tenant_id
 				WHERE t.external_id = $1 AND q.window_kind = 'day'`, external)).To(Equal(1))
@@ -204,7 +204,7 @@ var _ = Describe("Admin API", func() {
 		It("deletes a quota that is already gone", func() {
 			createTenant()
 			path := "/admin/v1/tenants/" + external + "/quotas/hour"
-			Expect(call("PUT", path, `{"max_requests":10}`).status).To(Equal(http.StatusOK))
+			Expect(call("PUT", path, `{"max_cost_nanos":10}`).status).To(Equal(http.StatusOK))
 
 			Expect(call("DELETE", path, "").status).To(Equal(http.StatusNoContent))
 			Expect(call("DELETE", path, "").status).To(Equal(http.StatusNoContent))
@@ -335,13 +335,13 @@ var _ = Describe("Admin API", func() {
 			createTenant()
 
 			Expect(call("PUT", quotasPath(), `{"quotas":[
-				{"window_kind":"minute","max_requests":60},
-				{"window_kind":"day","max_tokens":100000}
+				{"window_kind":"minute","max_cost_nanos":60},
+				{"window_kind":"day","max_cost_nanos":100000}
 			]}`).status).To(Equal(http.StatusOK))
 
 			set := `{"quotas":[
 				{"window_kind":"month","max_cost_nanos":5000000000,"on_exceed":"allow"},
-				{"window_kind":"minute","max_requests":120}
+				{"window_kind":"minute","max_cost_nanos":120}
 			]}`
 			r := call("PUT", quotasPath(), set)
 			Expect(r.status).To(Equal(http.StatusOK), r.body)
@@ -365,7 +365,7 @@ var _ = Describe("Admin API", func() {
 		// the database is left holding when a write fails part way.
 		It("leaves the old set intact when writing the new one fails part way", func() {
 			createTenant()
-			Expect(call("PUT", quotasPath(), `{"quotas":[{"window_kind":"minute","max_requests":60}]}`).status).
+			Expect(call("PUT", quotasPath(), `{"quotas":[{"window_kind":"minute","max_cost_nanos":60}]}`).status).
 				To(Equal(http.StatusOK))
 
 			c, cancel := ctx()
@@ -373,7 +373,7 @@ var _ = Describe("Admin API", func() {
 			_, err := pool.Exec(c, `
 				CREATE FUNCTION fail_quota_666() RETURNS trigger LANGUAGE plpgsql AS $$
 				BEGIN
-					IF NEW.max_requests = 666 THEN RAISE EXCEPTION 'injected failure'; END IF;
+					IF NEW.max_cost_nanos = 666 THEN RAISE EXCEPTION 'injected failure'; END IF;
 					RETURN NEW;
 				END $$;
 				CREATE TRIGGER fail_quota_666 BEFORE INSERT ON quotas
@@ -386,21 +386,21 @@ var _ = Describe("Admin API", func() {
 			})
 
 			r := call("PUT", quotasPath(), `{"quotas":[
-				{"window_kind":"hour","max_requests":10},
-				{"window_kind":"day","max_requests":666}
+				{"window_kind":"hour","max_cost_nanos":10},
+				{"window_kind":"day","max_cost_nanos":666}
 			]}`)
 			Expect(r.status).To(Equal(http.StatusInternalServerError), r.body)
 
 			var got struct {
 				Quotas []struct {
-					WindowKind  string `json:"window_kind"`
-					MaxRequests int64  `json:"max_requests"`
+					WindowKind   string `json:"window_kind"`
+					MaxCostNanos int64  `json:"max_cost_nanos"`
 				}
 			}
 			call("GET", quotasPath(), "").decode(&got)
 			Expect(got.Quotas).To(HaveLen(1))
 			Expect(got.Quotas[0].WindowKind).To(Equal("minute"))
-			Expect(got.Quotas[0].MaxRequests).To(Equal(int64(60)))
+			Expect(got.Quotas[0].MaxCostNanos).To(Equal(int64(60)))
 			Expect(auditRows("quota.replace")).To(Equal(1), "the failed replace left no audit row")
 		})
 
@@ -408,11 +408,12 @@ var _ = Describe("Admin API", func() {
 			createTenant()
 
 			for _, body := range []string{
-				`{"quotas":[{"window_kind":"period","max_requests":1}]}`,
-				`{"quotas":[{"window_kind":"day","period_start":"2026-09-01T00:00:00Z","period_end":"2026-10-01T00:00:00Z","max_requests":1}]}`,
+				`{"quotas":[{"window_kind":"period","max_cost_nanos":1}]}`,
+				`{"quotas":[{"window_kind":"day","period_start":"2026-09-01T00:00:00Z","period_end":"2026-10-01T00:00:00Z","max_cost_nanos":1}]}`,
 				`{"quotas":[{"window_kind":"day"}]}`,
-				`{"quotas":[{"window_kind":"day","max_tokens":-1}]}`,
-				`{"quotas":[{"window_kind":"period","period_start":"2026-10-01T00:00:00Z","period_end":"2026-09-01T00:00:00Z","max_requests":1}]}`,
+				`{"quotas":[{"window_kind":"day","max_cost_nanos":-1}]}`,
+				`{"quotas":[{"window_kind":"day","max_cost_nanos":1,"max_requests":60}]}`,
+				`{"quotas":[{"window_kind":"period","period_start":"2026-10-01T00:00:00Z","period_end":"2026-09-01T00:00:00Z","max_cost_nanos":1}]}`,
 			} {
 				r := call("PUT", quotasPath(), body)
 				Expect(r.status).To(Equal(http.StatusBadRequest), body)

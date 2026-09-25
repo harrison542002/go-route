@@ -239,16 +239,14 @@ type AuditLog struct {
 	Error *string
 }
 
-// The limits, set entirely over the admin API. go-route does not know what subscription tier produced these numbers; the customer billing system owns that and this enforces whatever it is told. One row per window kind, so a tenant can carry a monthly billing period and a per-minute rate limit at once.
+// Spend caps, set entirely over the admin API. go-route does not know what subscription tier produced these numbers; the customer billing system owns that and this enforces whatever it is told. One row per window kind, so a tenant can carry a monthly billing cap and a tighter daily one at once. Rate limiting is deliberately not here: it belongs to a future per-key table, because it is scoped to a credential rather than to a tenant and measured in seconds rather than billing periods.
 type Quota struct {
 	TenantID    uuid.UUID
 	WindowKind  WindowKind
 	PeriodStart *time.Time
 	PeriodEnd   *time.Time
-	MaxRequests *int64
-	MaxTokens   *int64
-	// Nanodollars, matching domains.USD.
-	MaxCostNanos *int64
+	// What the tenant may spend in this window, in nanodollars, matching domains.USD. NOT NULL because a quota that caps nothing is a no-op that reads like a limit; 0 is a real cap that allows nothing, which is how a tenant is stopped without being deleted.
+	MaxCostNanos int64
 	OnExceed     QuotaAction
 	UpdatedAt    time.Time
 }
