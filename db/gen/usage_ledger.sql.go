@@ -254,26 +254,34 @@ func (q *Queries) GetUsageLedgerEntry(ctx context.Context, id uuid.UUID) (UsageL
 	return i, err
 }
 
-type InsertUsageLedgerParams struct {
-	ID               uuid.UUID
-	StartedAt        time.Time
-	TenantID         uuid.UUID
-	KeyID            *uuid.UUID
-	RequestID        *string
-	RequestedModel   string
-	ChosenTarget     *string
-	Status           string
-	InputTokens      int32
-	OutputTokens     int32
-	CacheReadTokens  int32
-	CacheWriteTokens int32
-	ReasoningTokens  int32
-	CostNanos        *int64
-	TokenSource      string
-	PricingVersion   *string
-	Billable         bool
-	TtftMs           *int32
-	TotalMs          *int32
-	Metadata         []byte
-	Counterfactuals  []byte
+const insertUsageLedgerRows = `-- name: InsertUsageLedgerRows :execrows
+INSERT INTO usage_ledger (
+    id, started_at, tenant_id, key_id, request_id,
+    requested_model, chosen_target, status,
+    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+    cost_nanos, token_source, pricing_version, billable,
+    ttft_ms, total_ms, metadata, counterfactuals
+)
+SELECT
+    r.id, r.started_at, r.tenant_id, r.key_id, r.request_id,
+    r.requested_model, r.chosen_target, r.status,
+    r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_write_tokens, r.reasoning_tokens,
+    r.cost_nanos, r.token_source, r.pricing_version, r.billable,
+    r.ttft_ms, r.total_ms, r.metadata, r.counterfactuals
+FROM jsonb_populate_recordset(NULL::usage_ledger, $1::jsonb) AS r
+ON CONFLICT DO NOTHING
+`
+
+// Idempotent on purpose. Records reach this table through the on-disk
+// spool, which delivers at least once: a crash between the commit and
+// the spool deleting its segment replays rows that are already here.
+// COPY would fail the whole batch on the first duplicate primary key,
+// so the batch arrives as one JSON array instead, typed by the table's
+// own row type. The row count lets the caller see how many were new.
+func (q *Queries) InsertUsageLedgerRows(ctx context.Context, rows []byte) (int64, error) {
+	result, err := q.db.Exec(ctx, insertUsageLedgerRows, rows)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

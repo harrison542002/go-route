@@ -63,8 +63,20 @@ type Quota struct {
 }
 
 type Sink struct {
-	DSN           string        `yaml:"dsn"`
-	BufferSize    int           `yaml:"buffer_size"`
+	DSN string `yaml:"dsn"`
+
+	SpoolDir        string        `yaml:"spool_dir"`
+	SegmentMaxBytes int64         `yaml:"segment_max_bytes"`
+	Sync            string        `yaml:"sync"`
+	SyncInterval    time.Duration `yaml:"sync_interval"`
+	MaxSpoolBytes   int64         `yaml:"max_spool_bytes"`
+
+	// BufferSize is how many records may wait in memory for the spool's file
+	// writer before Record blocks.
+	BufferSize int `yaml:"buffer_size"`
+
+	// BatchSize and FlushInterval govern the shipper: rows per transaction, and
+	// how often a partly filled segment is shipped.
 	BatchSize     int           `yaml:"batch_size"`
 	FlushInterval time.Duration `yaml:"flush_interval"`
 }
@@ -205,6 +217,7 @@ func (c *Config) validate() error {
 		errs = append(errs, "sink: dsn is required; go-route needs Postgres to authenticate and to record spend")
 	}
 
+	errs = append(errs, c.validateSink()...)
 	errs = append(errs, c.validatePricing()...)
 	errs = append(errs, c.validateQuota()...)
 
@@ -213,6 +226,38 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config: invalid:\n  - %s", strings.Join(errs, "\n  - "))
 	}
 	return nil
+}
+
+func (c *Config) validateSink() []string {
+	var errs []string
+	s := c.Sink
+
+	switch s.Sync {
+	case "", "interval", "always":
+	default:
+		errs = append(errs, fmt.Sprintf("sink: sync must be interval or always, not %q", s.Sync))
+	}
+
+	for name, v := range map[string]int64{
+		"segment_max_bytes": s.SegmentMaxBytes,
+		"max_spool_bytes":   s.MaxSpoolBytes,
+		"buffer_size":       int64(s.BufferSize),
+		"batch_size":        int64(s.BatchSize),
+		"sync_interval":     int64(s.SyncInterval),
+		"flush_interval":    int64(s.FlushInterval),
+	} {
+		if v < 0 {
+			errs = append(errs, fmt.Sprintf("sink: %s must not be negative", name))
+		}
+	}
+
+	// A threshold smaller than one segment would sit permanently over the line
+	// the moment a single segment filled, and an alarm that is always on is an
+	// alarm nobody reads.
+	if s.MaxSpoolBytes > 0 && s.SegmentMaxBytes > 0 && s.MaxSpoolBytes < s.SegmentMaxBytes {
+		errs = append(errs, "sink: max_spool_bytes must be at least segment_max_bytes")
+	}
+	return errs
 }
 
 func (c *Config) validatePricing() []string {

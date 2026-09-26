@@ -102,22 +102,29 @@ func (q *Queries) GetAuditEntry(ctx context.Context, id uuid.UUID) (AuditLog, er
 	return i, err
 }
 
-type InsertAuditLogParams struct {
-	ID             uuid.UUID
-	Ts             time.Time
-	TenantID       *uuid.UUID
-	KeyID          *uuid.UUID
-	Actor          string
-	Action         string
-	RequestID      *string
-	ReasonKind     *string
-	ReasonDetail   *string
-	PolicyVersion  *int32
-	Ladder         []byte
-	LadderAttempts []byte
-	FinalTarget    *string
-	StatusCode     *int32
-	Error          *string
+const insertAuditLogRows = `-- name: InsertAuditLogRows :execrows
+INSERT INTO audit_log (
+    id, ts, tenant_id, key_id, actor, action, request_id,
+    reason_kind, reason_detail, policy_version,
+    ladder, ladder_attempts, final_target, status_code, error
+)
+SELECT
+    r.id, r.ts, r.tenant_id, r.key_id, r.actor, r.action, r.request_id,
+    r.reason_kind, r.reason_detail, r.policy_version,
+    r.ladder, r.ladder_attempts, r.final_target, r.status_code, r.error
+FROM jsonb_populate_recordset(NULL::audit_log, $1::jsonb) AS r
+ON CONFLICT DO NOTHING
+`
+
+// Idempotent for the same reason as InsertUsageLedgerRows: the spool
+// replays after a crash, and a replayed row must be a no-op rather than
+// a primary-key violation that fails the batch it arrived in.
+func (q *Queries) InsertAuditLogRows(ctx context.Context, rows []byte) (int64, error) {
+	result, err := q.db.Exec(ctx, insertAuditLogRows, rows)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const listAuditEntriesByRequestID = `-- name: ListAuditEntriesByRequestID :many

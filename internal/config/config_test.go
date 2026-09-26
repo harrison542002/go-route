@@ -8,8 +8,13 @@ import (
 	"time"
 )
 
+const dsn = "postgres://localhost/goroute"
+
 const minimal = `
-sink: {dsn: "postgres://localhost/goroute"}
+sink: {dsn: "` + dsn + `"}
+` + routing
+
+const routing = `
 providers:
   openai: {type: oaicompat, base_url: "https://api.openai.com/v1"}
 targets:
@@ -25,6 +30,11 @@ func load(t *testing.T, yaml string) (*Config, error) {
 		t.Fatal(err)
 	}
 	return Load(path)
+}
+
+// withSink builds a config whose sink block carries extra keys beside the dsn.
+func withSink(extra string) string {
+	return "sink:\n  dsn: \"" + dsn + "\"" + extra + "\n" + routing
 }
 
 func TestAdminBlockIsNoLongerAConfigKey(t *testing.T) {
@@ -56,6 +66,85 @@ func TestQuotaDefaults(t *testing.T) {
 	}
 	if cfg.Quota != want {
 		t.Errorf("quota = %+v, want %+v", cfg.Quota, want)
+	}
+}
+
+// The sink block is all optional: a config that names only a dsn must still
+// load, because the sink package owns the defaults.
+func TestSinkDefaultsAreLeftToTheSink(t *testing.T) {
+	cfg, err := load(t, minimal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sink != (Sink{DSN: dsn}) {
+		t.Errorf("sink = %+v, want every spool key left at its zero value", cfg.Sink)
+	}
+}
+
+func TestSinkBlockIsRead(t *testing.T) {
+	cfg, err := load(t, withSink(`
+  spool_dir: /var/lib/go-route/spool
+  segment_max_bytes: 1048576
+  sync: always
+  sync_interval: 50ms
+  max_spool_bytes: 2097152
+  buffer_size: 128
+  batch_size: 25
+  flush_interval: 2s`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Sink{
+		DSN:             dsn,
+		SpoolDir:        "/var/lib/go-route/spool",
+		SegmentMaxBytes: 1 << 20,
+		Sync:            "always",
+		SyncInterval:    50 * time.Millisecond,
+		MaxSpoolBytes:   2 << 20,
+		BufferSize:      128,
+		BatchSize:       25,
+		FlushInterval:   2 * time.Second,
+	}
+	if cfg.Sink != want {
+		t.Errorf("sink = %+v, want %+v", cfg.Sink, want)
+	}
+}
+
+func TestSinkValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		sink string
+		want string
+	}{
+		{
+			name: "an unknown sync mode",
+			sink: "  sync: sometimes",
+			want: "sink: sync must be interval or always",
+		},
+		{
+			name: "a negative segment size",
+			sink: "  segment_max_bytes: -1",
+			want: "sink: segment_max_bytes must not be negative",
+		},
+		{
+			name: "a negative sync interval",
+			sink: "  sync_interval: -1s",
+			want: "sink: sync_interval must not be negative",
+		},
+		{
+			name: "an alarm smaller than one segment would never switch off",
+			sink: "  segment_max_bytes: 1048576\n  max_spool_bytes: 1024",
+			want: "sink: max_spool_bytes must be at least segment_max_bytes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := load(t, withSink("\n"+tt.sink))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want it to mention %q", err, tt.want)
+			}
+		})
 	}
 }
 
